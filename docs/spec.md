@@ -26,7 +26,7 @@
 
 ### 成因
 
-pi 內建的 `createPowerShellTool` 把啟動參數寫死成一組常數（`dist/utils/shell.js` 的 `POWERSHELL_ARGS`，v1.5.0 實測），而且沒有任何設定可以關閉：
+pi 內建的 `createPowerShellTool` 把啟動參數寫死成一組常數（`dist/utils/shell.js` 的 `POWERSHELL_ARGS`，v1.5.2 實測），而且沒有任何設定可以關閉：
 
 ```
 POWERSHELL_ARGS = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command"]
@@ -60,6 +60,12 @@ pi 對 shell 的啟動方式提供兩條改動路徑，都碰不到啟動參數�
 `9d 68 d7 d6` 就是 `[System.Text.Encoding]::GetEncoding(936).GetBytes("漢字AB")` 的輸出，代表 GBK 編碼的「漢字」；pi 的輸出擷取層以 UTF-8 解碼子行程的輸出。單獨驗證那段指令的效果：`pwsh -NoProfile -NonInteractive -Command "[Console]::OutputEncoding.CodePage"` 得到 `936`，同一道命令前面接上那段指令得到 `65001`。因此那段指令本身就是字碼頁的決定者，不需要依賴 profile；拿掉這段指令屬於多餘的修改，不是修復。
 
 `-NonInteractive` 的理由同樣是可量測的：少了這個參數，命令要求輸入帳號密碼時會跳出一個真的桌面視窗，把整次呼叫卡到被外部強制收掉。實測帶這個參數約 540 毫秒內就以錯誤結束，不帶則超過 8 秒仍在等待。
+
+### 隨內建版新增：Windows PowerShell 5.1 的結束碼後綴
+
+pi 1.5.1 起的內建版（本機對 1.5.2 實測；1.5.0 的 tarball 沒有這段，1.5.1 起才有）在解析到的 shell 是 `powershell.exe`（Windows PowerShell 5.1）且命令不以反引號結尾時，會在命令後面接上一段結束碼後綴（`WINDOWS_POWERSHELL_EXIT_SUFFIX`）：5.1 會把重新導向的原生 stderr 轉成錯誤記錄並把 `$?` 設為 false，使得原生指令其實結束 0 的情況（例如 `git push 2>&1 | Select-Object -Last 3`）被回報成離開碼 1（上游 #8842）；PowerShell 7 沒有這個問題。擴充跟進同一段後綴，套用條件與順序（前綴、命令、後綴）都與內建版相同。
+
+實測（Windows PowerShell 5.1，本機）：把 `cmd /c 'echo err 1>&2' 2>&1 | Out-String` 作為最後一個陳述式送出，無後綴時離開碼 1、有後綴時離開碼 0。後綴不影響明確的 `exit 2`：`exit` 立即結束工作階段，後綴不會被執行。pwsh 7 上後綴不會被加上，兩版行為相同。
 
 ### 啟動參數不寫死
 
@@ -103,6 +109,7 @@ pi 對 shell 的啟動方式提供兩條改動路徑，都碰不到啟動參數�
 | 命令的送出方式（command 接在參數清單的最後） | 假設，不是複本：直接讀取 pi 的參數清單，因此預設清單以 `-Command` 結尾 | 會。pi 改成從 stdin 餵命令時，清單結尾不再是 `-Command`，而擴充仍把命令接在最後一個參數後面 | 測試讀取 `POWERSHELL_ARGS`，確認最後一項是 `-Command` |
 | 兩個旗標的名稱（`-NoProfile`、`-ExecutionPolicy`） | 寫在擴充裡的兩個常數 | 會。旗標改名，或 `-ExecutionPolicy` 改成自帶值的形式時，過濾什麼都濾不到，兩個旗標會被原樣送出，而且沒有任何錯誤訊息 | 測試讀取 pi 原始碼裡的 `POWERSHELL_ARGS`，確認兩個旗標還在，並確認過濾結果不含 `Bypass` |
 | UTF-8 前綴字串 | 逐字複製 | 會。pi 改字串時擴充留舊字串；只要新舊字串都設成 UTF-8，行為就相同，執行結果看不出來 | 測試比對兩邊的常數字串，不一致時印出兩份內容 |
+| 5.1 結束碼後綴（`WINDOWS_POWERSHELL_EXIT_SUFFIX`） | 逐字複製 | 會。pi 改後綴內容或套用條件時，擴充留舊版；5.1 的重導向場景可能回到誤報離開碼 1 | 測試比對兩邊的常數字串，並在 5.1 上實際執行重導向場景與明確 `exit` |
 | 結束寬限與逾時上限（`EXIT_STDIO_GRACE_MS`、`MAX_TIMEOUT_MS`） | 複製數值 | 會。pi 調整其中一個時，擴充留舊值 | 測試比對兩邊的數值 |
 | exec 的驗證順序、錯誤訊息、結束判定寫法 | 照內建版重寫 | 會。訊息或順序改變時擴充不會跟上，但這類差異大多只影響文字 | 沒有專門的上游比對；測試自己的斷言（逾時上限訊息、找不到工作目錄的訊息、取消與工作目錄的優先序）會在訊息或順序改變時失敗 |
 | 工具註冊的方式（`createPowerShellTool(cwd, { operations })` 是否採用傳入的 `operations`） | 呼叫內建工廠 | 會。若 pi 不再採用傳入的 `operations`，覆蓋會無聲失效，兩個旗標回到命令列 | 測試用 pi 自己的工廠建立真的工具物件，執行一道命令後檢查命令列裡沒有那兩個旗標 |
@@ -117,6 +124,7 @@ pi 對 shell 的啟動方式提供兩條改動路徑，都碰不到啟動參數�
 - **環境變數的預設值**：內建版在呼叫端沒有提供 `env` 時，會改用 `getShellEnv()`（這個函式會在 PATH 前面補上 `.pi/agent/bin`）。`getShellEnv` 沒有匯出，擴充只能原樣轉交呼叫端提供的 `env`。pi 本體一定會提供 `env`（`resolveSpawnContext` 會組好包含 `PI_*` 的環境變數），所以實際使用上沒有差別；差別只出現在 pi 本體之外直接呼叫擴充的情況，那時 PATH 的前置項目會少一層。
 - **工具的建立選項**：內建工具接受 `exposeSessionEnvironment`、`spawnHook`、`commandPrefix` 三個選項，擴充只轉交 `operations`。pi 本體建立工具時不會傳入任何 `powershell` 選項（`dist` 裡只有 `options?.powershell` 的讀取端，沒有設定端），因此兩邊行為相同；若有外部程式用這些選項建立工具，擴充的覆蓋會忽略那些選項。
 - **UTF-8 指令是一份字串複本**：內建版把那段指令放在私有常數 `UTF8_OUTPUT_PREFIX` 裡，套件入口沒有匯出，擴充只能複製字串。上游若改動那段指令，擴充不會自動跟上；測試只能驗證結果（字碼頁是 UTF-8），驗不到字串本身是否與上游一致。
+- **逾時錯誤附帶的提前結束資訊**：內建版的逾時錯誤是 `ShellTimeoutError`，帶有 `shellExit` 欄位；shell 在期限前就已結束、只是背景行程還在寫輸出時，工具層會在逾時訊息後附加「shell 以代碼 X 在 Y 秒前結束，但它啟動的背景行程持續寫出直到逾時」的說明（上游 #11613）。該類別沒有匯出，擴充的逾時錯誤是純文字 `timeout:<seconds>`；工具層以訊息前綴辨識，逾時仍正常回報，只是少了那段附註。
 - **工具的預設工作目錄**：擴充在載入時用 `process.cwd()` 建立工具，內建工具由 pi 用當下 session 的工作目錄建立。兩者在正常啟動（pi 在專案目錄裡啟動）完全相同；差別只出現在同一個 pi 程序內把 session 換到另一個工作目錄的情況（例如 `/resume`），那時擴充的預設工作目錄不會跟著換。
 
 ---
@@ -182,7 +190,7 @@ OpenCode 提供給插件的 shell 掛鉤是 `shell.create.before`：這個掛鉤
 
 ## 現行設置測試
 
-- **`pi-agent/tests/native-powershell/index.mjs`**（44 項檢查）：測試直接執行真的 pwsh，觀察 pwsh 實際如何被啟動、如何結束，不檢查原始碼寫了什麼。確認的項目如下：
+- **`pi-agent/tests/native-powershell/index.mjs`**（47 項檢查）：測試直接執行真的 pwsh，觀察 pwsh 實際如何被啟動、如何結束，不檢查原始碼寫了什麼。確認的項目如下：
   - 啟動參數：`-NonInteractive` 與那段 UTF-8 指令都在，`-NoProfile`、`-ExecutionPolicy`、`Bypass` 都不在；命令列與「直接用同樣參數啟動 pwsh」的結果一致。
   - 參數過濾的單元檢查：從內建版的五個參數過濾後只剩 `-NonInteractive -Command`；擴充不認得的參數照樣保留。這兩項不需要 pwsh，任何機器都會執行。
   - 命令的離開碼原樣回傳；呼叫端提供的 `env` 會傳進子行程。
@@ -191,7 +199,8 @@ OpenCode 提供給插件的 shell 掛鉤是 `shell.create.before`：這個掛鉤
   - 命令要求輸入時（`$Host.UI.PromptForChoice`、`Get-Credential`、`Read-Host` 三種），立刻以錯誤結束，不會卡住等待。
   - 包裝檢查：`pi.extensions` 指向的檔案存在，而且 `package.json` 沒有任何依賴欄位，安裝時不會額外下載套件。
   - 編碼：字碼頁是 65001，中文輸出正確。這兩項看的是那段 UTF-8 指令的效果，不依賴 profile，因此不需要環境前提。
-  - 上游比對：拿機器上實際安裝的 pi 比對擴充複製的內容。執行面的一項用 pi 自己的 `createPowerShellTool` 建立真的工具物件、執行真實命令，確認子行程的命令列裡沒有那兩個旗標、字碼頁是 65001、非 ASCII 輸出原樣返回、非零離開碼照實回報；文字面則直接讀 pi 的 `dist`，比對 `POWERSHELL_ARGS`（包含結尾是不是 `-Command`）、`UTF8_OUTPUT_PREFIX`、`EXIT_STDIO_GRACE_MS`、`MAX_TIMEOUT_MS` 與擴充的複本是否一致。比對會在每一項結果裡附上 pi 的版本；找不到 pi 套件時（可用 `NPS_PI_ROOT` 指定）這些項目標記 SKIP。
+  - Windows PowerShell 5.1（機上有 5.1 時執行，沒有則 SKIP）：重導向原生 stderr 且原生結束 0 的命令回報離開碼 0（後綴的效果）；明確的 `exit 2` 不被後綴覆蓋。
+  - 上游比對：拿機器上實際安裝的 pi 比對擴充複製的內容。執行面的一項用 pi 自己的 `createPowerShellTool` 建立真的工具物件、執行真實命令，確認子行程的命令列裡沒有那兩個旗標、字碼頁是 65001、非 ASCII 輸出原樣返回、非零離開碼照實回報；文字面則直接讀 pi 的 `dist`，比對 `POWERSHELL_ARGS`（包含結尾是不是 `-Command`）、`UTF8_OUTPUT_PREFIX`、`WINDOWS_POWERSHELL_EXIT_SUFFIX`、`EXIT_STDIO_GRACE_MS`、`MAX_TIMEOUT_MS` 與擴充的複本是否一致。比對會在每一項結果裡附上 pi 的版本；找不到 pi 套件時（可用 `NPS_PI_ROOT` 指定）這些項目標記 SKIP。
   - 沒有安裝 PowerShell 時，工具仍會註冊，`exec` 以內建版的錯誤訊息失敗。
   - 找不到任何 PowerShell 執行檔時，所有需要真的執行 pwsh 的項目一律標記 SKIP。輸出會分開統計 `passed`、`skipped`、`failed` 三個數字，跳過的項目不會被算成通過。
 - **`opencode/tests/packaging/index.mjs`**（22 項檢查）：發布前的完整性檢查，分成 `package.json` 與插件程式碼兩個部分。
@@ -209,7 +218,7 @@ OpenCode 提供給插件的 shell 掛鉤是 `shell.create.before`：這個掛鉤
 執行現行測試：
 
 ```bash
-npm run test:pi   # pi 擴充：native-powershell（44 項）
+npm run test:pi   # pi 擴充：native-powershell（47 項）
 npm run test:oc   # OpenCode 插件：packaging（22 項）＋ chat-trim-context（30 項）＋ pwsh-profile-loader（20 項）
 ```
 

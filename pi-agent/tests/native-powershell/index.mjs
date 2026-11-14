@@ -97,6 +97,7 @@ const DRIFT_LABELS = [
   'the host still ends its list with -Command (the transport this module assumes)',
   'startArguments drops only those two flags from the real host list',
   'the UTF-8 prefix copy still matches the host',
+  'the 5.1 exit-code suffix copy still matches the host',
   'the settlement grace copy still matches the host',
   'the timeout bound copy still matches the host',
 ];
@@ -165,9 +166,9 @@ try {
   delete process.env.NPS_NO_PS;
 
   const found = process.platform === 'win32' ? spawnSync('where.exe', ['pwsh'], { encoding: 'utf8' }).stdout.trim().split(/\r?\n/)[0] : '';
+  const live = await import(pathToFileURL(join(scratch, 'index.ts')).href + '?live');
   if (found) {
     process.env.NPS_SHELL = found;
-    const live = await import(pathToFileURL(join(scratch, 'index.ts')).href + '?live');
     const ops = live.createNativePowerShellOperations();
     const run = async (cmd, opts = {}, dir = process.cwd()) => {
       let out = '';
@@ -256,6 +257,32 @@ try {
     for (const label of LIVE_LABELS) skip(`${label} (no Windows pwsh on PATH)`, 'no PowerShell executable');
   }
 
+  // ---- Windows PowerShell 5.1: the exit-code suffix (#8842) --------------------
+  // The host appends a suffix when the resolved shell is powershell.exe, because 5.1
+  // turns redirected native stderr into error records and reports exit 1 for a native
+  // command that exited 0. This suite runs the real 5.1 against the exact scenario.
+  const ps51 = process.platform === 'win32' && process.env.SystemRoot
+    ? join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+    : '';
+  if (ps51 && existsSync(ps51)) {
+    process.env.NPS_SHELL = ps51;
+    const ops51 = live.createNativePowerShellOperations();
+    const run51 = async (cmd, opts = {}) => {
+      let out = '';
+      try {
+        const r = await ops51.exec(cmd, process.cwd(), { ...opts, onData: b => { out += Buffer.isBuffer(b) ? b.toString('utf8') : b; } });
+        return { out, ...r };
+      } catch (e) { return { out, error: e.message }; }
+    };
+    const redirected = await run51("cmd /c 'echo err 1>&2' 2>&1 | Out-String");
+    check('5.1: redirected native stderr with native exit 0 reports exit 0', redirected.exitCode === 0, JSON.stringify({ exitCode: redirected.exitCode, error: redirected.error, out: redirected.out.slice(0, 200) }));
+    const explicit = await run51('exit 2');
+    check('5.1: explicit exit code passes through the suffix', explicit.exitCode === 2, JSON.stringify({ exitCode: explicit.exitCode, error: explicit.error }));
+  } else {
+    skip('5.1: redirected native stderr with native exit 0 reports exit 0', 'no Windows PowerShell 5.1');
+    skip('5.1: explicit exit code passes through the suffix', 'no Windows PowerShell 5.1');
+  }
+
   // ---- drift guard: the copies this extension keeps from the host --------------
   // The default export is exercised against the host's own factory and tool object, so a
   // host change in how `operations` is forwarded shows up here instead of silently
@@ -336,13 +363,23 @@ try {
       hostPrefix !== null && hostPrefix === modulePrefix,
       JSON.stringify({ host: hostPrefix, module: modulePrefix }),
     );
+    // Both sides keep the suffix in a single-quoted literal; the raw literals are compared
+    // so an escape change on either side is flagged for review rather than silently ignored.
+    const suffixPattern = /const WINDOWS_POWERSHELL_EXIT_SUFFIX = ('(?:[^'\\]|\\.)*');/;
+    const hostSuffix = (hostPrefixSrc.match(suffixPattern) ?? [])[1] ?? null;
+    const moduleSuffix = (src.match(suffixPattern) ?? [])[1] ?? null;
+    check(
+      `D: ${DRIFT_LABELS[9]} (${at})`,
+      hostSuffix !== null && hostSuffix === moduleSuffix,
+      JSON.stringify({ host: hostSuffix, module: moduleSuffix }),
+    );
 
     const number = text => Number(String(text ?? '').replace(/_/g, ''));
     const hostChildSrc = readFileSync(join(hostPkgDir, 'dist', 'utils', 'child-process.js'), 'utf8');
     const hostGrace = number((hostChildSrc.match(/const EXIT_STDIO_GRACE_MS = ([\d_]+);/) ?? [])[1]);
     const moduleGrace = number((src.match(/const EXIT_STDIO_GRACE_MS = ([\d_]+)/) ?? [])[1]);
     check(
-      `D: ${DRIFT_LABELS[9]} (${at})`,
+      `D: ${DRIFT_LABELS[10]} (${at})`,
       hostGrace > 0 && hostGrace === moduleGrace,
       JSON.stringify({ host: hostGrace, module: moduleGrace }),
     );
@@ -350,7 +387,7 @@ try {
     const hostMax = number((hostBashSrc.match(/const MAX_TIMEOUT_MS = ([\d_]+);/) ?? [])[1]);
     const moduleMax = number((src.match(/const MAX_TIMEOUT_MS = ([\d_]+)/) ?? [])[1]);
     check(
-      `D: ${DRIFT_LABELS[10]} (${at})`,
+      `D: ${DRIFT_LABELS[11]} (${at})`,
       hostMax > 0 && hostMax === moduleMax,
       JSON.stringify({ host: hostMax, module: moduleMax }),
     );

@@ -6,21 +6,24 @@
 // Where each part lives:
 //   startArguments()      removes the two flags from the host's argument list
 //   UTF8_OUTPUT_PREFIX    the host's command prefix, copied verbatim
+//   EXIT_SUFFIX           the host's Windows PowerShell 5.1 exit-code suffix, copied verbatim
 //   killProcessTree()     the host's tree kill (taskkill /F /T)
 //   exec()                validation, spawn, settlement, cleanup
 //   default export        registers the tool through the host's own factory
 //
 // The comments below explain what each part does and why it is written this way. Why
-// exactly these two flags are dropped, why the UTF-8 prefix stays, what still differs
-// from the host: docs/spec.md section 1. Why -NonInteractive stays: without the flag a
-// command that asks for input (Get-Credential, Read-Host) opens a desktop dialog and
-// the tool call hangs until something outside kills it.
+// exactly these two flags are dropped, why the UTF-8 prefix stays, why the 5.1 exit
+// suffix stays, what still differs from the host: docs/spec.md section 1.
+// Why -NonInteractive stays: without the flag a command that asks for input
+// (Get-Credential, Read-Host) opens a desktop dialog and the tool call hangs until
+// something outside kills it.
 
 import { createPowerShellTool, getPowerShellConfig } from "@earendil-works/pi-coding-agent";
 import { access as fsAccess } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
 import { constants as osConstants } from "node:os";
+import { win32 } from "node:path";
 
 // Bounds taken from the host exec engine; a timeout beyond these overflows setTimeout.
 const MAX_TIMEOUT_MS = 2_147_483_647;
@@ -32,6 +35,15 @@ const EXIT_STDIO_GRACE_MS = 100;
 // console otherwise uses the system code page, so every non-ASCII output would arrive
 // mojibake'd. The test suite checks the resulting code page rather than this string.
 const UTF8_OUTPUT_PREFIX = "try { [Console]::OutputEncoding=[System.Text.Encoding]::UTF8 } catch {}\n";
+
+// Verbatim copy of WINDOWS_POWERSHELL_EXIT_SUFFIX in dist/core/tools/powershell.js, which
+// the host keeps private. Windows PowerShell 5.1 turns redirected native stderr into error
+// records and sets $? to false, so a native command that exits 0 but had its stderr
+// redirected (e.g. `git push 2>&1 | Select-Object -Last 3`) reports exit 1 (#8842);
+// PowerShell 7 does not. Appended only when the resolved shell is powershell.exe, and not
+// when the command ends with a backtick (a trailing backtick would continue into the
+// suffix and corrupt the last line). The test suite runs this exact scenario on 5.1.
+const WINDOWS_POWERSHELL_EXIT_SUFFIX = '\n;\nif ($?) { exit 0 }\nif (($LASTEXITCODE -eq 0) -and ("$($Error[0].FullyQualifiedErrorId)" -like "NativeCommandError*")) { exit 0 }\nexit 1';
 
 // The two flags this extension removes from POWERSHELL_ARGS.
 const DROPPED_FLAG = "-NoProfile";
@@ -96,8 +108,13 @@ export function createNativePowerShellOperations() {
       // Resolved per call, like the host: a missing executable then surfaces from exec
       // with the host's message instead of being frozen at load time.
       const shell = getPowerShellConfig();
+      // The host appends the 5.1 exit suffix to every command; same condition, same order
+      // (prefix first, then the command, then the suffix).
+      const suffix = win32.basename(shell.shell).toLowerCase() === "powershell.exe" && !command.endsWith("`")
+        ? WINDOWS_POWERSHELL_EXIT_SUFFIX
+        : "";
       return await new Promise<{ exitCode: number }>((resolve, reject) => {
-        const child = spawn(shell.shell, [...startArguments(shell.args), UTF8_OUTPUT_PREFIX + command], {
+        const child = spawn(shell.shell, [...startArguments(shell.args), UTF8_OUTPUT_PREFIX + command + suffix], {
           cwd, env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
         });
         const streams = [child.stdout, child.stderr];
