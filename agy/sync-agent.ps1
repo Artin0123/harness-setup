@@ -14,6 +14,7 @@ param(
     [string[]]$Agents = @("build"),
     [string]$SkillsDir = (Join-Path $HOME ".agents\skills"),
     [string]$AgentsDir = (Join-Path $HOME ".gemini\config\agents"),
+    [string]$AppDataDir = (Join-Path $HOME ".gemini\antigravity-cli"),
     [switch]$DryRun
 )
 
@@ -189,10 +190,10 @@ if (Test-Path $SkillsDir) {
     }
 }
 
-# 2. 組裝注入區塊（直接與原生 XML 標籤格式一致）
+# 2. 組裝注入區塊（直接填入實際絕對路徑，避免 excludeDefaultComponents: true 缺少 <user_information> 時 read_file 因相對路徑失敗）
 $sb = [System.Text.StringBuilder]::new()
 [void]$sb.AppendLine('<conversation_transcript>')
-[void]$sb.AppendLine('Transcripts are located directly at `<appDataDir>\brain\<conversation-id>\.system_generated\logs\transcript.jsonl` (and `transcript_full.jsonl`), where `<appDataDir>` is the `App Data Directory` in `<user_information>` (typically `~\.gemini\antigravity-cli`).')
+[void]$sb.AppendLine("Transcripts are located directly at ``$AppDataDir\brain\<conversation-id>\.system_generated\logs\transcript.jsonl``.")
 [void]$sb.AppendLine('- When a user mentions `@[conversation:"..."]`, find its `Conversation ID` in `<ADDITIONAL_METADATA>`.')
 [void]$sb.AppendLine('- Start with `transcript.jsonl` (compact). When `truncated_fields` is present, read only the specific corresponding line in `transcript_full.jsonl`.')
 [void]$sb.AppendLine('</conversation_transcript>')
