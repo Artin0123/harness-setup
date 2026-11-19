@@ -26,6 +26,12 @@
   - **系統提示詞精簡 99%**：原生預設代理的 `systemInstruction` 高達 **19,254 字元**（含 `<identity>`、`<artifacts>`、`<skills>`、`<slash_commands>`、`<user_rules>` 等）；而在啟用 `excludeDefaultComponents: true` 的 `clean-template` 下，提示詞縮水至僅 **125 字元**（僅保留自訂的 System Prompt 正文）。
   - **工具宣告（`functionDeclarations`）精確控制**：預設代理會掛載 13 支工具；在 `clean-template` 下會關閉子代理、排程、搜尋等預設組件建構器，僅掛載核心基礎的 6 支工具（`read_file`、`write_file`、`edit_file`、`run_command`、`manage_task`、`ask_question`）。若自訂 `tools:` 進一步精簡，更可縮減至指定的極少數工具。
 
+### 4. `agy/sync-agent.ps1`（客製代理初始化與 Skills／對話規則同步）
+- **主要用途**：建立或更新 `~\.gemini\config\agents\<agent>.md`（預設為 `build`），在使用 `excludeDefaultComponents: true` 保持乾淨提示詞的同時，自動補回 `~\.agents\skills` 清單與跨對話紀錄讀取規則。
+- **解決的痛點**：
+  - **自動建立範本**：若目標 `.md` 不存在，會自動建立含 `excludeDefaultComponents: true` 與已驗證可用 `tools:` 清單（含 `generate_image` 等 13 支可用工具，排除無效的 `swarm` 與強制附掛的 `manage_task`）的設定檔，並在檔頭附上遠端生成指令。
+  - **冪等同步**：若檔案已存在，會完整保留既有 YAML 與自訂正文，僅更新 `<conversation_transcript>` 與 `<skills>` 區塊，不產生多餘註解標記。
+
 ---
 
 ## 使用方式
@@ -58,6 +64,12 @@
   ```powershell
   irm https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/get-agy-token.ps1 | iex
   ```
+
+### 4. `agy/sync-agent.ps1`（客製代理初始化與 Skills／對話規則同步）
+- **主要用途**：建立或更新 `~\.gemini\config\agents\<agent>.md`（預設為 `build`），在使用 `excludeDefaultComponents: true` 保持乾淨提示詞的同時，自動補回 `~\.agents\skills` 清單與跨對話紀錄讀取規則。
+- **解決的痛點**：
+  - **自動建立範本**：若目標 `.md` 不存在，會自動建立含 `excludeDefaultComponents: true` 與已驗證可用 `tools:` 清單（含 `generate_image` 等 13 支可用工具，排除無效的 `swarm` 與強制附掛的 `manage_task`）的設定檔，並在檔頭附上遠端生成指令。
+  - **冪等同步**：若檔案已存在，會完整保留既有 YAML 與自訂正文，僅更新 `<conversation_transcript>` 與 `<skills>` 區塊，不產生多餘註解標記。
 
 ---
 
