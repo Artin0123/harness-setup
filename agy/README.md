@@ -32,6 +32,14 @@
   - **自動建立範本**：若目標 `.md` 不存在，會自動建立含 `excludeDefaultComponents: true` 與已驗證可用 `tools:` 清單（含 `generate_image` 等 13 支可用工具，排除無效的 `swarm` 與強制附掛的 `manage_task`）的設定檔，並在檔頭附上遠端生成指令。
   - **冪等同步**：若檔案已存在，會完整保留既有 YAML 與自訂正文，僅更新 `<conversation_transcript>` 與 `<skills>` 區塊，不產生多餘註解標記。
 
+### 5. `agy/audit_tokens.py`（Token 精確計數 vs 真實回傳比對與隱藏內容稽核）
+- **主要用途**：比對 `agy` **本地實際組裝送出的內容**與**真實後端回傳的 `usage`（`input_tokens`、`output_tokens`、`thinking_tokens`、`cache_read_tokens`）**是否一致，並檢查是否有額外注入的隱藏標籤、系統提示詞或工具 Schema。
+- **核心設計（預設 `--agent build`、`--model gemini-3.8-flash-low`）**：
+  - **逐輪拆解（`stream-json` + `transcript.jsonl` 備援）**：複雜指令常觸發多輪工具呼叫，本腳本透過 `--output-format stream-json` 拆出每一輪獨立的 `input_tokens`，確保「第一輪抓包」只跟「第一輪實際消耗」比對，不被後續輪次干擾。
+  - **A/B 雙檔差分探針（`--prompt-file` / `--probe-prompt-file`）**：預設讀取 `p1.txt` 與 `p2.txt` 並相減，抵銷掉固定的 `systemInstruction` 與 `tools` 開銷，精準抓出特定輸入是否觸發額外隱藏上下文。
+  - **文字檔自動定位**：讀取多行 UTF-8 `.txt`；若目前工作目錄找不到相對路徑，會自動改搜尋腳本所在目錄（`agy/`）。
+  - **強制官方 `:countTokens` 計數**：必須提供 `--gemini-api-key`（或環境變數 `GEMINI_API_KEY`），統一由官方端點取得精確分詞數，不進行本地粗估；亦可搭配 `--proxy-upstream` 在單一連線內完成抓包與回傳比對。
+
 ---
 
 ## 使用方式
@@ -65,12 +73,6 @@
   irm https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/get-agy-token.ps1 | iex
   ```
 
-### 4. `agy/sync-agent.ps1`（客製代理初始化與 Skills／對話規則同步）
-- **主要用途**：建立或更新 `~\.gemini\config\agents\<agent>.md`（預設為 `build`），在使用 `excludeDefaultComponents: true` 保持乾淨提示詞的同時，自動補回 `~\.agents\skills` 清單與跨對話紀錄讀取規則。
-- **解決的痛點**：
-  - **自動建立範本**：若目標 `.md` 不存在，會自動建立含 `excludeDefaultComponents: true` 與已驗證可用 `tools:` 清單（含 `generate_image` 等 13 支可用工具，排除無效的 `swarm` 與強制附掛的 `manage_task`）的設定檔，並在檔頭附上遠端生成指令。
-  - **冪等同步**：若檔案已存在，會完整保留既有 YAML 與自訂正文，僅更新 `<conversation_transcript>` 與 `<skills>` 區塊，不產生多餘註解標記。
-
 ---
 
 ### 二、Schema 抓包測試使用方式 (`capture_schema.py`)
@@ -95,3 +97,62 @@ python agy/capture_schema.py --run-agy --agent clean-template --model gemini-3.8
    agy --settings='{"modelProvider":"gemini"}' --model=gemini-3.8-flash-low --agent clean-template -p="hii"
    ```
    產生的捕獲檔案會以 `capture_01.json`、`capture_02.json` 依序存放在指定輸出目錄中。
+
+---
+
+### 三、Token 稽核與 A/B 差分比對使用方式 (`audit_tokens.py`)
+
+本腳本統一採用 **A/B 雙檔差分模式**（預設讀取 `p1.txt` 與 `p2.txt`，預設 `--agent build`、`--model gemini-3.8-flash-low`），並**強制透過 Gemini 官方 `:countTokens` 端點**精確計數，無論從任何工作目錄執行皆可自動定位同目錄下的 `.txt` 檔：
+
+#### 1. 常用執行指令
+
+```powershell
+# 1. 直接執行（必須提供 Gemini API Key，自動使用 p1.txt + p2.txt 跑 A/B 差分）
+python C:\Users\artin\Sync\coding\harness-plugins\agy\audit_tokens.py --gemini-api-key "YOUR_KEY"
+
+# 2. 若已設定環境變數 $env:GEMINI_API_KEY，可直接省略參數
+python C:\Users\artin\Sync\coding\harness-plugins\agy\audit_tokens.py
+
+# 3. 手動指定其他基準檔與探針檔
+python C:\Users\artin\Sync\coding\harness-plugins\agy\audit_tokens.py --gemini-api-key "YOUR_KEY" --prompt-file a.txt --probe-prompt-file b.txt
+
+# 4. 只看本地抓包與官方 :countTokens 精確拆解、不打真實後端（不消耗 agy 額度）
+python C:\Users\artin\Sync\coding\harness-plugins\agy\audit_tokens.py --gemini-api-key "YOUR_KEY" --skip-real
+```
+
+#### 2. 輸出數值含義說明
+
+- **`[1] LOCAL CAPTURED PAYLOAD BREAKDOWN`（本地送出內容拆解）**
+  - `contents` / `Injected tags`：實際送出的使用者訊息長度、官方精確 token 數，以及被 `agy` 自動包進去的標籤（例如 `<USER_REQUEST>`、`<ADDITIONAL_METADATA>`、`<USER_SETTINGS_CHANGE>`）。
+  - `systemInstruction`：系統提示詞總字元數與官方 token 數；在 `Baseline` 會額外展開前幾大 XML 區塊（如 `<skills>`、`<Output>`、`<conversation_transcript>`）。
+  - `tools (N declarations)`：實際掛載進模型請求的 `functionDeclarations` 數量、字元數與官方 token 數。
+  - `Gemini countTokens (exact)`：官方 `:countTokens` 回傳的整包精確 token 數。
+- **`[2] REAL BACKEND RESPONSE & PER-TURN USAGE`（真實後端回傳）**
+  - `Init tools list`：`agy` 在 `stream-json` 初始化事件宣告的可用工具總數（例如 `build` 會列出 60 支）。
+  - `Step N (...)`：每一輪模型請求各自真實回傳的 `in`（輸入）、`out`（輸出）、`think`（隱藏思考）、`cache`（快取命中）。
+  - `Total usage`：整次對話所有輪次加總的 token 消耗（若遇到逾時中斷，會自動從 `transcript.jsonl` 補齊）。
+- **`[3] TURN-1 COMPARISON & HIDDEN CONTENT CHECK`（第一輪比對與異常標記）**
+  - `Expected (official) vs Turn-1 input_tokens`：第一輪官方 `:countTokens` 精確值與後端實際計費 `input_tokens` 的差值。
+  - `Effective chars/token ratio`：整包送出字元數除以實際 `input_tokens`。
+  - `Tool count mismatch`：提示 `Init` 宣告的工具總數與實際塞進請求的 `functionDeclarations` 數量不同（例如宣告 60 支但只送出 6 支）。
+  - *(註：`AGY PROBE REPORT` 會自動略過與 `Baseline` 重複的結構拆解與警告，僅顯示新增的異常。)*
+- **`A/B DIFFERENTIAL PROBE SUMMARY`（A/B 差分總結）**
+  - `Δ_official`：`Probe` 與 `Baseline` 在官方 `:countTokens` 上的精確差值。
+  - `Δ_actual`：`Probe` 與 `Baseline` 在真實第一輪 `input_tokens` 的差值。
+  - `Unexplained delta (Δ_actual - Δ_official)`：抵銷所有固定系統開銷與模型版本差異後的「未解釋差值」。正常應接近 `0 tok`；若出現大幅正偏差（> 20 tok），即表示探針觸發了額外的隱藏內容或上下文。
+
+#### 3. 完整參數一覽
+
+| 參數 | 預設值 | 說明 |
+| :--- | :--- | :--- |
+| `--gemini-api-key` | **必填**（或讀 `GEMINI_API_KEY`） | Gemini API Key，用於呼叫官方 `:countTokens` 精確計數 |
+| `--prompt-file` | `p1.txt` | 基準提示詞 `.txt` 檔案路徑 |
+| `--probe-prompt-file` | `p2.txt` | 探針提示詞 `.txt` 檔案路徑 |
+| `--model` | `gemini-3.8-flash-low` | 指定測試模型 ID（可用 `agy models` 查詢） |
+| `--agent` | `build` | 指定代理名稱；傳入 `""` 可測原生預設代理 |
+| `--settings` | `""` | 額外傳給 `agy --settings` 的 JSON 字串 |
+| `--timeout` | `120` | 單次 `agy` 執行的逾時秒數（對應 `--print-timeout`） |
+| `--disable-slash-commands` | 關閉 | 停用斜線指令與 Skills 展開 |
+| `--skip-real` | 關閉 | 僅執行本地抓包與 `:countTokens`，不呼叫真實 `agy` |
+| `--proxy-upstream` | `""` | 指定上游網址（如 `https://generativelanguage.googleapis.com`）進行單次透傳 |
+| `--out-dir` | `""` | 將完整 `audit_report.json` 與 `captured_request.json` 存檔至指定目錄 |
