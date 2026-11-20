@@ -254,7 +254,7 @@ def group_by_turns(requests: list[dict], user_steps: list[tuple[int, str]]) -> l
             "tps": (total_out / stream_sum) if (total_out > 0 and stream_sum > 0) else None,
             "time": user_steps[i][1],
         })
-    return turns[-30:][::-1]
+    return turns[::-1]
 
 
 def inspect_conversation(cid: str) -> dict | None:
