@@ -1,0 +1,9 @@
+{
+  "ensure-server": {
+    "SessionStart": [
+      {
+        "command": "python ./hooks/ensure_server.py"
+      }
+    ]
+  }
+}

@@ -4,35 +4,41 @@
 
 ---
 
-## 腳本功能說明
+## 插件與腳本功能說明
 
-### 1. `agy/login.ps1`（遠端裝置登入輔助）
+### 1. `agy/agy-metrics/`（CLI / Remote Control 本地遙測儀表板插件）
+- **主要用途**：專為 `agy` CLI 與 `agy remote-control` 設計的零依賴網頁儀表板（詳見 [`agy-metrics/README.md`](./agy-metrics/README.md)），直接解析本地 `conversations/*.db` 的 Protobuf 遙測資料，無需安裝任何第三方套件。
+- **核心設計**：
+  - **自動啟停**：由 `hooks.json` 的 `SessionStart` Hook 自動於背景啟動 `http://127.0.0.1:47891`，並在所有 `agy.exe` 關閉（如 `/exit`）後約 10 秒自動優雅退出。
+  - **SSE 即時更新與輪次彙總**：免輪詢即時刷新，將同輪多次工具呼叫彙總顯示 `TTFT / 總耗時`、純串流速度（`tok/s`）、上下文與快取命中率，並自動過濾已刪除對話、依具名專案與 `CLI Project` 分類搜尋。
+
+### 2. `agy/login.ps1`（遠端裝置登入輔助）
 - **主要用途**：讓遠端連線裝置（例如透過手機 SSH 連進 Windows 電腦）能夠輕鬆完成 Google OAuth 登入。
 - **解決的痛點**：
   - 原生 `agy` 產生的 Google OAuth 授權網址長達數百字元，在手機 SSH 終端中極難點擊與複製。
   - 本腳本會即時攔截網址並轉換為 **TinyURL 直達短網址**，點擊後手機瀏覽器即可直接登入 Google 取得授權碼，貼回終端機即完成登入。
   - 若已處於登入狀態，會自動辨識並提示「無需重複登入」，避免多餘等待。
 
-### 2. `agy/get-agy-token.ps1`（無法 OAuth 環境的 Token 提取器）
+### 3. `agy/get-agy-token.ps1`（無法 OAuth 環境的 Token 提取器）
 - **主要用途**：提供給無法進行標準 OAuth 互動流程的環境（例如嵌入式 iframe 視窗、無頭工作環境），使其可透過已授權的 Access Token 連線。
 - **解決的痛點**：
   - 免帶參數，執行時自動透過 `agy models` 發起一次認證請求以確保 Token 處於最新刷新狀態。
   - **雙來源備援讀取**：Windows SSH 連線（Type 3 Network Logon）會隔離 Windows 憑證庫，本腳本能同時搜尋 Windows 憑證管理員（`gemini:antigravity`）與本地檔案（`~/.gemini/antigravity-cli/antigravity-oauth-token`），自動挑選最新有效的 Token。
   - **安全防洩漏**：不直接在終端機印出敏感的 raw access token，而是直接將 Token 複製到系統剪貼簿，僅在畫面上顯示帳號、長度與剩餘有效分鐘數。
 
-### 3. `agy/capture_schema.py`（本地 Schema 抓包與代理檢驗）
+### 4. `agy/capture_schema.py`（本地 Schema 抓包與代理檢驗）
 - **主要用途**：利用 `agy` 原生支援的 `modelProvider: "gemini"` 與 `GOOGLE_GEMINI_BASE_URL` 環境變數，在本地啟動輕量 Gemini API 模擬伺服器，精準捕獲 `agy` 發送給模型的完整請求 JSON（包含 `systemInstruction`、`functionDeclarations`、`contents`、`generationConfig` 等）。
 - **實測對照發現（預設代理 vs `clean-template`）**：
   - **系統提示詞精簡 99%**：原生預設代理的 `systemInstruction` 高達 **19,254 字元**（含 `<identity>`、`<artifacts>`、`<skills>`、`<slash_commands>`、`<user_rules>` 等）；而在啟用 `excludeDefaultComponents: true` 的 `clean-template` 下，提示詞縮水至僅 **125 字元**（僅保留自訂的 System Prompt 正文）。
   - **工具宣告（`functionDeclarations`）精確控制**：預設代理會掛載 13 支工具；在 `clean-template` 下會關閉子代理、排程、搜尋等預設組件建構器，僅掛載核心基礎的 6 支工具（`read_file`、`write_file`、`edit_file`、`run_command`、`manage_task`、`ask_question`）。若自訂 `tools:` 進一步精簡，更可縮減至指定的極少數工具。
 
-### 4. `agy/sync-agent.ps1`（客製代理初始化與 Skills／對話規則同步）
+### 5. `agy/sync-agent.ps1`（客製代理初始化與 Skills／對話規則同步）
 - **主要用途**：建立或更新 `~\.gemini\config\agents\<agent>.md`（預設為 `build`），在使用 `excludeDefaultComponents: true` 保持乾淨提示詞的同時，自動補回 `~\.agents\skills` 清單與跨對話紀錄讀取規則。
 - **解決的痛點**：
   - **自動建立範本**：若目標 `.md` 不存在，會自動建立含 `excludeDefaultComponents: true` 與已驗證可用 `tools:` 清單（含 `generate_image` 等 13 支可用工具，排除無效的 `swarm` 與強制附掛的 `manage_task`）的設定檔，並在檔頭附上遠端生成指令。
   - **冪等同步**：若檔案已存在，會完整保留既有 YAML 與自訂正文，僅更新 `<conversation_transcript>` 與 `<skills>` 區塊，不產生多餘註解標記。
 
-### 5. `agy/audit_tokens.py`（Token 精確計數 vs 真實回傳比對與隱藏內容稽核）
+### 6. `agy/audit_tokens.py`（Token 精確計數 vs 真實回傳比對與隱藏內容稽核）
 - **主要用途**：比對 `agy` **本地實際組裝送出的內容**與**真實後端回傳的 `usage`（`input_tokens`、`output_tokens`、`thinking_tokens`、`cache_read_tokens`）**是否一致，並檢查是否有額外注入的隱藏標籤、系統提示詞或工具 Schema。
 - **核心設計（預設 `--agent build`、`--model gemini-3.8-flash-low`）**：
   - **逐輪拆解（`stream-json` + `transcript.jsonl` 備援）**：複雜指令常觸發多輪工具呼叫，本腳本透過 `--output-format stream-json` 拆出每一輪獨立的 `input_tokens`，確保「第一輪抓包」只跟「第一輪實際消耗」比對，不被後續輪次干擾。
@@ -44,7 +50,23 @@
 
 ## 使用方式
 
-### 一、遠端執行一行指令 (One-Liners)
+### 一、`agy-metrics` 插件安裝與使用
+
+- **安裝插件**：
+  ```powershell
+  agy plugin install https://github.com/Artin0123/harness-setup/tree/master/agy/agy-metrics
+  ```
+- **開啟儀表板**：啟動 `agy` 後會自動拉起背景服務，瀏覽器前往 `http://127.0.0.1:47891` 即可查看；若需手動優雅關閉，可點擊網頁右上角 **「關閉服務」** 或執行 `irm -Method Post http://127.0.0.1:47891/api/shutdown`。
+- **VS Code 快捷鍵自動開啟範例**：
+  ```json
+  "args": {
+    "text": "python \"$env:USERPROFILE\\.gemini\\config\\plugins\\agy-metrics\\hooks\\ensure_server.py\"; Start-Process http://127.0.0.1:47891; agy -c --remote-control\r"
+  }
+  ```
+
+---
+
+### 二、遠端執行一行指令 (One-Liners)
 
 無需預先下載腳本至本機，直接在終端機執行即可：
 
@@ -75,7 +97,7 @@
 
 ---
 
-### 二、Schema 抓包測試使用方式 (`capture_schema.py`)
+### 三、Schema 抓包測試使用方式 (`capture_schema.py`)
 
 #### 方式 A：一鍵自動抓包（推薦，自動開服、調用 `agy`、存檔後退出）
 
@@ -100,7 +122,7 @@ python agy/capture_schema.py --run-agy --agent clean-template --model gemini-3.8
 
 ---
 
-### 三、Token 稽核與 A/B 差分比對使用方式 (`audit_tokens.py`)
+### 四、Token 稽核與 A/B 差分比對使用方式 (`audit_tokens.py`)
 
 本腳本統一採用 **A/B 雙檔差分模式**（預設讀取 `p1.txt` 與 `p2.txt`，預設 `--agent build`、`--model gemini-3.8-flash-low`），並**強制透過 Gemini 官方 `:countTokens` 端點**精確計數，無論從任何工作目錄執行皆可自動定位同目錄下的 `.txt` 檔：
 

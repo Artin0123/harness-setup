@@ -1,0 +1,6 @@
+{
+  "name": "agy-metrics",
+  "displayName": "agy-metrics",
+  "version": "1.0.0",
+  "description": "Zero-dependency context, cache, and generation speed monitor for agy CLI and Remote Control."
+}
