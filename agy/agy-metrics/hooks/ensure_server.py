@@ -33,6 +33,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--stop", action="store_true", help="Gracefully stop the background server")
     parser.add_argument("--url", action="store_true", help="Print the dashboard URL to stdout")
+    parser.add_argument("--lan", action="store_true", help="Bind to 0.0.0.0 for LAN access")
     args = parser.parse_args()
 
     if args.stop:
@@ -42,6 +43,9 @@ def main() -> None:
     if not is_listening(PORT):
         server_py = Path(__file__).resolve().parent.parent / "sidecars" / "metrics_panel" / "server.py"
         if server_py.is_file():
+            cmd_args = [str(server_py), "--port", str(PORT)]
+            if args.lan:
+                cmd_args.append("--lan")
             exe = sys.executable
             if os.name == "nt":
                 pythonw = Path(exe).with_name("pythonw.exe")
@@ -49,7 +53,7 @@ def main() -> None:
                     exe = str(pythonw)
                 flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
                 subprocess.Popen(
-                    [exe, str(server_py), "--port", str(PORT)],
+                    [exe, *cmd_args],
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
@@ -58,7 +62,7 @@ def main() -> None:
                 )
             else:
                 subprocess.Popen(
-                    [exe, str(server_py), "--port", str(PORT)],
+                    [exe, *cmd_args],
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,

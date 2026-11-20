@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 import threading
 import time
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
@@ -26,6 +27,22 @@ def resolve_data_dir() -> Path:
 
 BASE_DIR = resolve_data_dir()
 INDEX_HTML = Path(__file__).with_name("index.html")
+PWA_ICON = (
+    "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E"
+    "%3Crect width='32' height='32' rx='8' fill='%23171a23'/%3E"
+    "%3Cpath d='M5 18h5l3-8 5 12 3-6h6' fill='none' stroke='%236aa9ff' stroke-width='2.6' "
+    "stroke-linecap='round' stroke-linejoin='round'/%3E"
+    "%3Ccircle cx='25' cy='16' r='2.2' fill='%233ddc97'/%3E%3C/svg%3E"
+)
+PWA_MANIFEST = json.dumps({
+    "name": "agy-metrics",
+    "short_name": "agy-metrics",
+    "start_url": "/",
+    "display": "standalone",
+    "background_color": "#0f1117",
+    "theme_color": "#0f1117",
+    "icons": [{"src": PWA_ICON, "sizes": "any", "type": "image/svg+xml"}],
+}, ensure_ascii=False).encode("utf-8")
 
 
 def read_varint(buf: bytes, i: int) -> tuple[int, int]:
@@ -122,9 +139,16 @@ def parse_gen_row(idx: int, data: bytes) -> dict | None:
     if not has_usage:
         return None
 
+    model_name = ""
+    if 21 in m1 and m1[21]:
+        model_name = m1[21][0].decode("utf-8", errors="ignore").strip()
+    elif 19 in m1 and m1[19]:
+        model_name = m1[19][0].decode("utf-8", errors="ignore").strip()
+
     return {
         "idx": idx,
         "lastStepIndex": last_step_index,
+        "model": model_name,
         "uncachedIn": uncached_in,
         "cachedIn": cached_in,
         "contextTokens": total_ctx,
@@ -156,10 +180,24 @@ def classify_group(project_id: str, workspace_uris: str) -> tuple[str, str, str]
     return ("一般", "", "gen")
 
 
-def group_by_turns(requests: list[dict], user_steps: list[int]) -> list[dict]:
+def parse_step_time(meta_blob: bytes | None) -> str:
+    if not meta_blob:
+        return "—"
+    meta = parse_pb(meta_blob)
+    if 1 in meta and meta[1]:
+        ts = parse_pb(meta[1][0])
+        sec = ts.get(1, [None])[0]
+        if isinstance(sec, int) and sec > 1_000_000_000:
+            return datetime.fromtimestamp(sec).strftime("%m/%d %H:%M")
+    return "—"
+
+
+def group_by_turns(requests: list[dict], user_steps: list[tuple[int, str]]) -> list[dict]:
     if not user_steps:
         ttft_sum = sum(r["ttft"] or 0 for r in requests)
         stream_sum = sum(r["streaming"] or 0 for r in requests)
+        cached_in = sum(r["cachedIn"] for r in requests)
+        uncached_in = sum(r["uncachedIn"] for r in requests)
         total_out = sum(r["totalOut"] for r in requests)
         return [
             {
@@ -167,10 +205,14 @@ def group_by_turns(requests: list[dict], user_steps: list[int]) -> list[dict]:
                 "requestCount": len(requests),
                 "ttftSum": ttft_sum,
                 "durSum": ttft_sum + stream_sum,
+                "cachedIn": cached_in,
+                "uncachedIn": uncached_in,
+                "totalIn": cached_in + uncached_in,
                 "think": sum(r["think"] for r in requests),
                 "reply": sum(r["reply"] for r in requests),
                 "totalOut": total_out,
                 "tps": (total_out / stream_sum) if (total_out > 0 and stream_sum > 0) else None,
+                "time": "—",
             }
         ]
 
@@ -181,7 +223,7 @@ def group_by_turns(requests: list[dict], user_steps: list[int]) -> list[dict]:
             turn_idx = len(user_steps) - 1
         else:
             turn_idx = 0
-            for i, step_idx in enumerate(user_steps):
+            for i, (step_idx, _) in enumerate(user_steps):
                 if ls >= step_idx:
                     turn_idx = i
                 else:
@@ -195,16 +237,22 @@ def group_by_turns(requests: list[dict], user_steps: list[int]) -> list[dict]:
             continue
         ttft_sum = sum(r["ttft"] or 0 for r in reqs)
         stream_sum = sum(r["streaming"] or 0 for r in reqs)
+        cached_in = sum(r["cachedIn"] for r in reqs)
+        uncached_in = sum(r["uncachedIn"] for r in reqs)
         total_out = sum(r["totalOut"] for r in reqs)
         turns.append({
             "turnNo": i + 1,
             "requestCount": len(reqs),
             "ttftSum": ttft_sum,
             "durSum": ttft_sum + stream_sum,
+            "cachedIn": cached_in,
+            "uncachedIn": uncached_in,
+            "totalIn": cached_in + uncached_in,
             "think": sum(r["think"] for r in reqs),
             "reply": sum(r["reply"] for r in reqs),
             "totalOut": total_out,
             "tps": (total_out / stream_sum) if (total_out > 0 and stream_sum > 0) else None,
+            "time": user_steps[i][1],
         })
     return turns[-30:][::-1]
 
@@ -219,8 +267,8 @@ def inspect_conversation(cid: str) -> dict | None:
     try:
         rows = conn.execute("SELECT idx, data FROM gen_metadata ORDER BY idx ASC").fetchall()
         user_steps = [
-            r[0]
-            for r in conn.execute("SELECT idx FROM steps WHERE step_type = 14 ORDER BY idx ASC").fetchall()
+            (r[0], parse_step_time(r[1]))
+            for r in conn.execute("SELECT idx, metadata FROM steps WHERE step_type = 14 ORDER BY idx ASC").fetchall()
         ]
     finally:
         conn.close()
@@ -347,6 +395,8 @@ class Handler(BaseHTTPRequestHandler):
         qs = parse_qs(parsed.query)
         if parsed.path == "/":
             self._send(200, "text/html; charset=utf-8", INDEX_HTML.read_bytes())
+        elif parsed.path == "/manifest.webmanifest":
+            self._send(200, "application/manifest+json; charset=utf-8", PWA_MANIFEST)
         elif parsed.path == "/api/conversations":
             q = qs.get("q", [""])[0]
             g = qs.get("group", ["all"])[0]
@@ -419,12 +469,16 @@ def watch_agy_exit(server: ThreadingHTTPServer) -> None:
 def main():
     parser = argparse.ArgumentParser()
     sidecar_port = os.environ.get("ANTIGRAVITY_SIDECAR_WEB_PORT")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--lan", action="store_true", help="Bind to 0.0.0.0 for LAN access")
     parser.add_argument("--port", type=int, default=int(sidecar_port or "47891"))
     args = parser.parse_args()
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    host = "0.0.0.0" if args.lan else args.host
+    server = ThreadingHTTPServer((host, args.port), Handler)
+    server.daemon_threads = True
     if not sidecar_port:
         threading.Thread(target=watch_agy_exit, args=(server,), daemon=True).start()
-    print(f"[agy-metrics] listening on http://127.0.0.1:{args.port}", flush=True)
+    print(f"[agy-metrics] listening on http://{host}:{args.port}", flush=True)
     server.serve_forever()
 
 

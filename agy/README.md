@@ -10,7 +10,7 @@
 - **主要用途**：專為 `agy` CLI 與 `agy remote-control` 設計的零依賴網頁儀表板（詳見 [`agy-metrics/README.md`](./agy-metrics/README.md)），直接解析本地 `conversations/*.db` 的 Protobuf 遙測資料，無需安裝任何第三方套件。
 - **核心設計**：
   - **自動啟停**：由 `hooks.json` 的 `SessionStart` Hook 自動於背景啟動 `http://127.0.0.1:47891`，並在所有 `agy.exe` 關閉（如 `/exit`）後約 1 秒自動優雅退出。
-  - **SSE 即時更新與輪次彙總**：免輪詢即時刷新，將同輪多次工具呼叫彙總顯示 `TTFT / 總耗時`、純串流速度（`tok/s`）、上下文與快取命中率，並自動過濾已刪除對話、依具名專案與 `CLI Project` 分類搜尋。
+  - **SSE 即時更新與輪次彙總**：免輪詢即時刷新，將同輪多次工具呼叫彙總顯示 `TTFT / 總耗時`、純串流速度（`tok/s`）、輸入／輸出拆分、執行時間與當前模型，支援 PWA 獨立視窗與 `--lan` 區網模式。
 
 ### 2. `agy/login.ps1`（遠端裝置登入輔助）
 - **主要用途**：讓遠端連線裝置（例如透過手機 SSH 連進 Windows 電腦）能夠輕鬆完成 Google OAuth 登入。
