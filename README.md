@@ -25,13 +25,13 @@ Coding Agent 的環境修復設置合集。Windows 上以原生 PowerShell 為�
 - **代價**：每道命令開頭多一段 794 字元的載入程式碼，加上執行 profile 的時間（由你的 profile 內容決定）。profile 印出的內容會出現在工具輸出裡。
 - **需求**：OpenCode ≥ 2.2.5。
 
-### agy-tools（Antigravity CLI 輔助工具集）
+### agy-metrics（Antigravity CLI 插件）
 
-針對 Google Antigravity CLI (`agy`) 的遠端登入、憑證提取與 Schema 抓包檢驗工具，詳見 [`agy/README.md`](agy/README.md)。
+- **解決的問題**：`agy` CLI 與 `agy remote-control` 原生不顯示即時上下文佔用、快取命中率、TTFT、純串流速度（`tok/s`）與輪次統計。本插件以零外部依賴的 Python 3 標準庫提供本地網頁儀表板（`http://127.0.0.1:47891`），支援 SSE 即時推送、對話搜尋篩選、PWA 獨立視窗、`--lan` 區網模式，並在所有 `agy.exe` 關閉後約 1 秒自動退出。詳見 [`agy/agy-metrics/README.md`](agy/agy-metrics/README.md)。
 
-- **`agy/login.ps1`**：遠端裝置（例如手機 SSH）登入專用。自動攔截 Google OAuth 長網址並轉為 TinyURL 短網址，直達授權頁面，貼回授權碼即可完成登入。
-- **`agy/get-agy-token.ps1`**：無法進行 OAuth 的環境（例如嵌入式 iframe 視窗）連線專用。免參數自動刷新並自 Windows 憑證庫與本地檔案提取最新 Token，自動複製到剪貼簿，保護隱私不印出 raw token。
-- **`agy/capture_schema.py`**：本地 Gemini API 抓包代理伺服器。利用 `modelProvider: "gemini"` 與 `GOOGLE_GEMINI_BASE_URL` 精準捕獲 `agy` 發送給模型的完整請求 JSON（驗證系統提示詞、自訂 tools 宣告與組件過濾效果）。
+### agy-tools（Antigravity CLI 輔助腳本）
+
+針對 Google Antigravity CLI (`agy`) 的遠端登入、憑證提取、代理同步、Schema 抓包與 Token 稽核腳本（包含 `login.ps1`、`get-agy-token.ps1`、`capture_schema.py`、`sync-agent.ps1`、`audit_tokens.py`），詳見 [`agy/README.md`](agy/README.md)。
 
 ## 安裝
 
@@ -81,9 +81,17 @@ cp -r opencode/pwsh-profile-loader ~/.config/opencode/plugins/
 
 確認與更新：`opencode plugin list`、`opencode plugin update pwsh.profile-loader`。移除：`opencode plugin remove pwsh.profile-loader`。
 
-### 4. agy：遠端登入、憑證提取與 Schema 抓包
+### 4. agy：agy-metrics（插件）
 
-認證腳本無需下載至本機，可在終端機直接透過一行指令載入執行；抓包工具可一鍵檢驗代理請求 Schema（詳見 [`agy/README.md`](agy/README.md)）：
+```powershell
+agy plugin install https://github.com/Artin0123/harness-setup/tree/master/agy/agy-metrics
+```
+
+啟動 `agy` 後會自動於背景啟動 `http://127.0.0.1:47891`（詳細參數與 VS Code 快捷鍵範例見 [`agy/agy-metrics/README.md`](agy/agy-metrics/README.md)）。
+
+### 5. agy：其他輔助腳本
+
+認證腳本無需下載至本機，可在終端機直接執行；抓包與稽核腳本的使用方式與完整參數詳見 [`agy/README.md`](agy/README.md)：
 
 ```powershell
 # 手機 SSH 遠端登入（攔截網址轉 TinyURL 短網址直達授權）：
@@ -91,9 +99,6 @@ pwsh -Command "irm https://raw.githubusercontent.com/Artin0123/harness-setup/mas
 
 # 取得 access token 到剪貼簿（iframe / 嵌入視窗連線）：
 pwsh -Command "irm https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/get-agy-token.ps1 | iex"
-
-# 檢驗 clean-template 代理送出的完整 Schema（一鍵自動開服、測試並存檔）：
-python agy/capture_schema.py --run-agy --agent clean-template --model gemini-3.8-flash-low --out-dir ./captures
 ```
 
 ## 測試
