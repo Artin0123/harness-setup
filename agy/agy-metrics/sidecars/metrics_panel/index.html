@@ -159,7 +159,7 @@ async function fetchDetail() {
   lastMtimeMs = d.mtimeMs;
   const l = d.latest, t = d.totals;
   const ctxPct = l.maxContextTokens ? (l.contextTokens / l.maxContextTokens * 100) : 0;
-  const ctxCls = ctxPct >= 90 ? 'bad' : ctxPct >= 75 ? 'warn' : 'ok';
+  const ctxCls = ctxPct >= 80 ? 'bad' : ctxPct >= 60 ? 'warn' : 'ok';
   const cachePct = t.totalIn ? (t.cachedIn / t.totalIn * 100) : 0;
 
   detail.innerHTML = `
