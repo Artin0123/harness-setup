@@ -4,7 +4,7 @@
 
 ## 功能特色
 
-- **自動啟停**：透過 `SessionStart` Hook 在啟動 `agy` 時靜默拉起背景網頁服務（`http://127.0.0.1:47891`）；當所有 `agy.exe` 行程結束後約 10 秒自動優雅關閉。
+- **自動啟停**：透過 `SessionStart` Hook 在啟動 `agy` 時靜默拉起背景網頁服務（`http://127.0.0.1:47891`）；當所有 `agy.exe` 行程結束後約 1 秒自動優雅關閉。
 - **即時推送（SSE）**：監聽本地 `conversations/*.db` 與 `conversation_summaries.db` 異動，無需輪詢即可即時刷新。
 - **對話清單與搜尋**：自動過濾已刪除對話，支援依標題、ID 前綴與專案標籤（具名專案資料夾名稱、`CLI Project`）即時搜尋與篩選。
 - **四核心指標卡片（鍵值兩端對齊）**：上下文（已用／上限與進度條）、總輸入（快取／未快取／命中率）、總輸出（思考／回覆）、距離上次請求與總請求次數。
@@ -29,7 +29,7 @@ agy plugin install https://github.com/Artin0123/harness-setup/tree/master/agy/ag
 
 ### 手動優雅關閉背景服務
 
-- 點擊網頁右上角 **「關閉服務」** 按鈕，或於終端機執行：
+- 於終端機執行：
   ```powershell
   irm -Method Post http://127.0.0.1:47891/api/shutdown
   ```

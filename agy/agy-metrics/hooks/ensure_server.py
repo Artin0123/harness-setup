@@ -32,47 +32,47 @@ def stop_server(port: int) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--stop", action="store_true", help="Gracefully stop the background server")
+    parser.add_argument("--url", action="store_true", help="Print the dashboard URL to stdout")
     args = parser.parse_args()
 
     if args.stop:
         stop_server(PORT)
         return
 
-    if is_listening(PORT):
-        return
+    if not is_listening(PORT):
+        server_py = Path(__file__).resolve().parent.parent / "sidecars" / "metrics_panel" / "server.py"
+        if server_py.is_file():
+            exe = sys.executable
+            if os.name == "nt":
+                pythonw = Path(exe).with_name("pythonw.exe")
+                if pythonw.is_file():
+                    exe = str(pythonw)
+                flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+                subprocess.Popen(
+                    [exe, str(server_py), "--port", str(PORT)],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=flags,
+                    close_fds=True,
+                )
+            else:
+                subprocess.Popen(
+                    [exe, str(server_py), "--port", str(PORT)],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                    close_fds=True,
+                )
 
-    server_py = Path(__file__).resolve().parent.parent / "sidecars" / "metrics_panel" / "server.py"
-    if not server_py.is_file():
-        return
+            for _ in range(30):
+                if is_listening(PORT):
+                    break
+                time.sleep(0.05)
 
-    exe = sys.executable
-    if os.name == "nt":
-        pythonw = Path(exe).with_name("pythonw.exe")
-        if pythonw.is_file():
-            exe = str(pythonw)
-        flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
-        subprocess.Popen(
-            [exe, str(server_py), "--port", str(PORT)],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=flags,
-            close_fds=True,
-        )
-    else:
-        subprocess.Popen(
-            [exe, str(server_py), "--port", str(PORT)],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-            close_fds=True,
-        )
-
-    for _ in range(30):
-        if is_listening(PORT):
-            break
-        time.sleep(0.05)
+    if args.url:
+        print(f"http://localhost:{PORT}")
 
 
 if __name__ == "__main__":

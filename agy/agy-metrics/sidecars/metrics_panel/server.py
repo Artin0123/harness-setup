@@ -407,17 +407,13 @@ def is_agy_running() -> bool:
 def watch_agy_exit(server: ThreadingHTTPServer) -> None:
     started_at = time.time()
     saw_agy = False
-    missed = 0
     while True:
-        time.sleep(5)
+        time.sleep(1)
         if is_agy_running():
             saw_agy = True
-            missed = 0
-        else:
-            missed += 1
-            if (saw_agy or time.time() - started_at > 30) and missed >= 2:
-                server.shutdown()
-                return
+        elif saw_agy or (time.time() - started_at > 10):
+            server.shutdown()
+            return
 
 
 def main():
