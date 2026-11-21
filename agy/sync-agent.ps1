@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     建立或同步 agy 自訂代理 (.md)，自動生成標準 YAML 設定並冪等注入 ~\.agents\skills 與跨對話紀錄規則。
 .DESCRIPTION
