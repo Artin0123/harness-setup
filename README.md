@@ -42,17 +42,28 @@ Coding Agent 的環境修復設置合集。Windows 上以原生 PowerShell 為�
 本擴充用到 `createPowerShellTool`、`getPowerShellConfig` 與 `PowerShellOperations`，這三個介面最早在 pi 0.84.3 一起出現；npm 上最舊的可用版本 0.74.0 完全沒有 powershell 相關匯出。
 
 ```bash
-# 套件安裝（推薦）
+# 套件安裝（推薦）：機器上有獨立的 pi 指令時
 pi install git:github.com/Artin0123/harness-setup
 
 # 手動安裝：複製到全域擴充目錄
 cp -r pi-agent/native-powershell ~/.pi/agent/extensions/
 ```
 
+機器上只透過 pi-web 使用 pi 時（pi 以 pi-web 相依套件的形式存在，沒有全域 `pi` 指令），用 npm 為 pi-web 生成的 bin 啓動器執行同一條指令。路徑由 `npm root -g` 解析，跟著實際的全域安裝位置走：
+
+```powershell
+$pi = Join-Path (npm root -g) "@agegr\pi-web\node_modules\.bin\pi.ps1"   # 非 Windows 用 .bin/pi
+& $pi install git:github.com/Artin0123/harness-setup
+& $pi list
+& $pi remove git:github.com/Artin0123/harness-setup
+```
+
+這條路與 pi-web UI 的安裝按鈕完全等價：兩邊呼叫的都是 pi 的 `DefaultPackageManager.installAndPersist`，寫入同一個 `~/.pi/agent/settings.json` 的 `packages` 與同一個套件快取目錄，互相看得到對方裝的套件。重跑同一條 `install` 等同更新（重新拉取 GitHub 上的預設分支）。
+
 安裝後確認三件事：
 
 - `powershell` 工具在啟用清單裡（`defaultTools` 或 `--tools` 參數）。擴充是取代同名工具，工具沒有啟用就不會被呼叫，效果等同沒有安裝。
-- `pi list` 看得到這個擴充。
+- `pi list` 看得到這個擴充（只有 pi-web 時用上面 `$pi` 啓動器的 `$pi list`）。
 - 不需要另外設定編碼。擴充沿用內建工具那段 UTF-8 設定指令，非 ASCII 輸出在安裝完就能正常顯示。
 
 移除：`pi remove git:github.com/Artin0123/harness-setup`。

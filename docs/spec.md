@@ -26,7 +26,7 @@
 
 ### 成因
 
-pi 內建的 `createPowerShellTool` 把啟動參數寫死成一組常數（`dist/utils/shell.js` 的 `POWERSHELL_ARGS`，v1.5.2 實測），而且沒有任何設定可以關閉：
+pi 內建的 `createPowerShellTool` 把啟動參數寫死成一組常數（`dist/utils/shell.js` 的 `POWERSHELL_ARGS`，v1.5.2 實測；v1.6.0 重新驗證，常數內容完全相同），而且沒有任何設定可以關閉：
 
 ```
 POWERSHELL_ARGS = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command"]
