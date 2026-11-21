@@ -5,10 +5,10 @@
     - 若目標 ~/.gemini/config/agents/<agent>.md 不存在，會自動建立標準範本（含生成指令註解、excludeDefaultComponents: true 與已驗證可用的 tools 清單）。
     - 若檔案已存在，則保留既有的 YAML Frontmatter 與自訂系統提示詞正文，僅冪等更新尾端的 <conversation_transcript> 與 <skills> 區塊。
     - 冪等鏡像 skills：agy 原生掃描路徑不含 HOME 層級的 ~\.agents\skills（僅工作區 .agents/skills 與全域 ~/.gemini/config/skills 等），
-      本腳本會將各 skill 以位元組級複製鏡像到 ~/.gemini/config/skills（帶 .agy-synced 標記），使預設代理、TUI 斜線指令與
-      Antigravity App/IDE 得以原生發現；實測 agy 掃描器不跟隨 directory junction，故須實體複製。
-      僅鏡像頂層即含 SKILL.md 的資料夾（對齊 native 掃描結構 skills/*/SKILL.md）；標記內容記錄來源路徑，
-      僅清理「來源一致且來源已消失」的孤兒鏡像，不動使用者自建資料夾或其他來源的鏡像；抄渡中途失敗的殘缺鏡像下次執行自癒。
+      本腳本會將各 skill 以位元組級複製鏡像到 ~/.gemini/config/skills，使預設代理、TUI 斜線指令與 Antigravity App/IDE 得以原生發現；
+      實測 agy 掃描器不跟隨 directory junction，故須實體複製。僅鏡像頂層即含 SKILL.md 的資料夾（對齊 native 掃描結構 skills/*/SKILL.md）。
+      ~/.gemini/config/skills 的管理範圍僅限同名：同名資料夾一律刪除重抄以來源為準（殘缺鏡像自動修復），
+      其餘資料夾（如使用者自建 skill）完全不動；來源端已刪除的 skill 其鏡像因無法與自建內容區分，刻意不自動清理，需自行移除。
 .EXAMPLE
     pwsh -Command "irm https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/sync-agent.ps1 | iex"
     pwsh -File .\agy\sync-agent.ps1 -Agents build
@@ -201,14 +201,10 @@ if (Test-Path $SkillsDir) {
 # HOME 層級的 ~\.agents\skills 不在掃描範圍；且掃描器不跟隨 junction（實測驗證），故以位元組級複製鏡像。
 # 僅鏡像「頂層即含 SKILL.md」的資料夾，對齊 native 掃描結構 skills/*/SKILL.md；
 # 深層 SKILL.md 連鏡了也不會被 native glob 發現，刻意不鏡像，僅列於注入區塊供 read_file 使用。
-$SyncMarker = ".agy-synced"
-# 標記內容記錄鏡像來源；TrimEnd 統一路徑結尾避免同一路徑寫出不同標記；
-# 清理時僅認「來源一致」的孤兒，防止帶另一個 -SkillsDir 執行時誤刪既有鏡像
-$SyncSourceTag = "Synced from $($SkillsDir.TrimEnd('\', '/'))"
+# 管理範圍僅限同名：同名資料夾一律刪除重抄（以來源為準；重抄中途失敗的殘缺鏡像下次執行亦同機制自癒），
+# config/skills 內其餘資料夾（如使用者自建 skill）完全不動。
+# 來源端已刪除的 skill 其鏡像因無法與使用者自建內容區分，刻意不自動清理，需自行移除。
 $mirroredNames = [System.Collections.Generic.List[string]]::new()
-$skippedNames = [System.Collections.Generic.List[string]]::new()
-$prunedNames = [System.Collections.Generic.List[string]]::new()
-$foreignNames = [System.Collections.Generic.List[string]]::new()
 if (Test-Path $SkillsDir) {
     $skillDirs = @(Get-ChildItem -LiteralPath $SkillsDir -Directory | Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "SKILL.md") -PathType Leaf })
     if ($skillDirs.Count -gt 0 -and -not $DryRun -and -not (Test-Path $GlobalSkillsDir)) {
@@ -216,57 +212,20 @@ if (Test-Path $SkillsDir) {
     }
     foreach ($dir in $skillDirs) {
         $dest = Join-Path $GlobalSkillsDir $dir.Name
-        $destExists = Test-Path -LiteralPath $dest
-        if ($destExists -and -not (Test-Path -LiteralPath (Join-Path $dest $SyncMarker))) {
-            # 既有資料夾非本腳本鏡像（無標記），不覆寫使用者自建內容
-            $skippedNames.Add($dir.Name)
-            continue
-        }
         if (-not $DryRun) {
-            if ($destExists) {
-                # 刪除後重抄，避免源內已刪檔案殘留於鏡像
+            if (Test-Path -LiteralPath $dest) {
                 Remove-Item -LiteralPath $dest -Recurse -Force
             }
-            # 先建資料夾與標記再抄內容：若中途失敗，殘缺鏡像仍帶標記，下次執行會自動重抄修復
-            New-Item -ItemType Directory -Path $dest -Force | Out-Null
-            Set-Content -LiteralPath (Join-Path $dest $SyncMarker) -Value $SyncSourceTag -NoNewline -Encoding Ascii
-            Get-ChildItem -LiteralPath $dir.FullName -Force | Copy-Item -Destination $dest -Recurse -Force
+            Copy-Item -LiteralPath $dir.FullName -Destination $GlobalSkillsDir -Recurse -Force
         }
         $mirroredNames.Add($dir.Name)
     }
-    # 清理帶標記、來源記錄一致且來源已消失的孤兒鏡像（不動無標記的使用者自建資料夾或其他來源的鏡像）
-    if (Test-Path $GlobalSkillsDir) {
-        foreach ($existing in @(Get-ChildItem -LiteralPath $GlobalSkillsDir -Directory)) {
-            $markerFullPath = Join-Path $existing.FullName $SyncMarker
-            if (-not (Test-Path -LiteralPath $markerFullPath)) { continue }
-            $ownerTag = ([string](Get-Content -LiteralPath $markerFullPath -Raw)).Trim()
-            if ($ownerTag -ne $SyncSourceTag) {
-                # 由其他來源鏡像的資料夾，本次執行不清理不覆寫（僅提示）
-                if ($mirroredNames -notcontains $existing.Name) {
-                    $foreignNames.Add($existing.Name)
-                }
-                continue
-            }
-            if (-not (Test-Path -LiteralPath (Join-Path $SkillsDir $existing.Name))) {
-                if (-not $DryRun) {
-                    Remove-Item -LiteralPath $existing.FullName -Recurse -Force
-                }
-                $prunedNames.Add($existing.Name)
-            }
-        }
-    }
     if ($DryRun) {
-        Write-Host "[DryRun] 鏡像預覽 ($SkillsDir -> $GlobalSkillsDir) 將鏡像: $($mirroredNames -join ', ') 同名衝突略過: $($skippedNames -join ', ') 將清理孤兒: $($prunedNames -join ', ')" -ForegroundColor Yellow
-    } else {
-        if ($mirroredNames.Count -gt 0) { Write-Host "[OK]已鏡像到 $GlobalSkillsDir : $($mirroredNames -join ', ')" -ForegroundColor Green }
-        if ($skippedNames.Count -gt 0) { Write-Host "[SKIP]config/skills 已有同名非鏡像資料夾，保留原樣: $($skippedNames -join ', ')" -ForegroundColor Yellow }
-        if ($prunedNames.Count -gt 0) { Write-Host "[OK]已清理來源已消失的鏡像: $($prunedNames -join ', ')" -ForegroundColor Green }
-    }
-    if ($foreignNames.Count -gt 0) {
-        Write-Host "[SKIP]config/skills 存在其他來源鏡像的資料夾，本次不清理不覆寫: $($foreignNames -join ', ')" -ForegroundColor Yellow
+        Write-Host "[DryRun] 鏡像預覽 ($SkillsDir -> $GlobalSkillsDir) 將鏡像(同名覆蓋): $($mirroredNames -join ', ')" -ForegroundColor Yellow
+    } elseif ($mirroredNames.Count -gt 0) {
+        Write-Host "[OK]已鏡像到 $GlobalSkillsDir (同名覆蓋): $($mirroredNames -join ', ')" -ForegroundColor Green
     }
 }
-
 # 2. 組裝注入區塊（直接填入實際絕對路徑，避免 excludeDefaultComponents: true 缺少 <user_information> 時 read_file 因相對路徑失敗）
 $sb = [System.Text.StringBuilder]::new()
 [void]$sb.AppendLine('<conversation_transcript>')

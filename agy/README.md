@@ -37,10 +37,10 @@
 - **解決的痛點**：
   - **自動建立範本**：若目標 `.md` 不存在，會自動建立含 `excludeDefaultComponents: true` 與已驗證可用 `tools:` 清單（含 `generate_image` 等 13 支可用工具，排除無效的 `swarm` 與強制附掛的 `manage_task`）的設定檔，並在檔頭附上遠端生成指令。
   - **冪等同步**：若檔案已存在，會完整保留既有 YAML 與自訂正文，僅更新 `<conversation_transcript>` 與 `<skills>` 區塊，不產生多餘註解標記。
-  - **Skills 原生發現（鏡像）**：依官方文檔與實測（`capture_schema.py` 抓包對照），agy 的 skills 掃描路徑為工作區 `.agents/skills`、全域 `~/.gemini/config/skills`、插件 `~/.gemini/config/plugins/<plugin>/skills` 與 CLI 額外遺留路徑；**HOME 層級的 `~\.agents\skills` 不在任何掃描範圍**，且**掃描器不跟隨 directory junction**（實測驗證）。因此本腳本每次執行都會冪等地將各 skill 資料夾「刪除後重抄」到 `~\.gemini\config\skills`（位元組級複製，避免轉碼層，非 ASCII 內容安全），並在鏡像資料夾內植入 `.agy-synced` 標記：
-    - 只清理「帶標記、來源一致且來源已消失」的孤兒鏡像；不會動使用者在 `config/skills` 自建的同名資料夾（同名時跳過並提示），也不會清理由其他來源鏡像的資料夾（防止帶另一個 `-SkillsDir` 執行時誤刪）。標記先寫入再抄檔，抄渡中途失敗留下的殘缺鏡像會在下次執行時自動重抄修復。
+  - **Skills 原生發現（鏡像）**：依官方文檔與實測（`capture_schema.py` 抓包對照），agy 的 skills 掃描路徑為工作區 `.agents/skills`、全域 `~/.gemini/config/skills`、插件 `~/.gemini/config/plugins/<plugin>/skills` 與 CLI 額外遺留路徑；**HOME 層級的 `~\.agents\skills` 不在任何掃描範圍**，且**掃描器不跟隨 directory junction**（實測驗證）。因此本腳本每次執行都會冪等地將各 skill 資料夾「刪除後重抄」到 `~\.gemini\config\skills`（位元組級複製，避免轉碼層，非 ASCII 內容安全）：
+    - 管理範圍僅限同名：同名衝突一律刪舊覆新（以 `~\.agents\skills` 為準；重抄中途失敗的殘缺鏡像下次執行自動重抄修復）；`config\skills` 內其餘資料夾（如使用者自建的 `find-docs`）完全不動。來源端已刪除的 skill，其鏡像因無法與使用者自建內容區分，刻意不自動清理，需自行移除。
     - 僅鏡像頂層即含 `SKILL.md` 的資料夾（對齊 native 掃描結構 `skills/*/SKILL.md`）；深層 `SKILL.md` 連鏡了也不會被 native glob 發現，刻意不鏡像，仍只列於注入區塊供 `read_file` 使用。
-    - 鏡像後，預設代理的 native `<skills>` 清單、TUI 斜線指令（每個 skill 自動成為 `/skill-name`）、`/skills reload` 與 Antigravity App/IDE 均可原生發現這些 skills。`build` 代理因 `excludeDefaultComponents: true` 不會收到 native 組件，仍以注入區塊中的絕對路徑（`read_file` 實測可讀）為通道。
+    - 鏡像後，預設代理的 native `<skills>` 清單、TUI 斜線指令（每個 skill 自動成為 `/skill-name`）、`/skills reload` 與 Antigravity App/IDE 均可原生發現這些 skills；抄檔中途失敗留下的殘缺鏡像，下次執行會因同名而再次刪除重抄自動修復。`build` 代理因 `excludeDefaultComponents: true` 不會收到 native 組件，仍以注入區塊中的絕對路徑（`read_file` 實測可讀）為通道。
 
 ### 6. `agy/audit_tokens.py`（Token 精確計數 vs 真實回傳比對與隱藏內容稽核）
 - **主要用途**：比對 `agy` **本地實際組裝送出的內容**與**真實後端回傳的 `usage`（`input_tokens`、`output_tokens`、`thinking_tokens`、`cache_read_tokens`）**是否一致，並檢查是否有額外注入的隱藏標籤、系統提示詞或工具 Schema。
