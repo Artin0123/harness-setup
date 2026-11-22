@@ -41,7 +41,7 @@ def main() -> None:
         return
 
     if not is_listening(PORT):
-        server_py = Path(__file__).resolve().parent.parent / "sidecars" / "metrics_panel" / "server.py"
+        server_py = Path(__file__).resolve().parent.parent / "server.py"
         if server_py.is_file():
             cmd_args = [str(server_py), "--port", str(PORT)]
             if args.lan:
