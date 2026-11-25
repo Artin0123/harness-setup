@@ -281,7 +281,10 @@ class TestEnsureServer(unittest.TestCase):
             self.assertEqual(self.es.get_latest_conversation(Path(tmpdir) / "missing.db"), ("", ""))
 
     def test_build_remote_url(self):
-        self.assertEqual(self.es.build_remote_url("7c598ac2-f03d-4548-a073-aad41497bcc6-v2"), self.es.REMOTE_URL)
+        self.assertEqual(
+            self.es.build_remote_url("7c598ac2-f03d-4548-a073-aad41497bcc6-v2", fixed=True),
+            self.es.REMOTE_URL,
+        )
         self.assertEqual(
             self.es.build_remote_url(
                 "7c598ac2-f03d-4548-a073-aad41497bcc6-v2",
@@ -338,7 +341,13 @@ class TestEnsureServer(unittest.TestCase):
             mock_spawn.reset_mock()
             self.es.main(["--open-remote", "fixed"])
             mock_latest.assert_not_called()
+            self.assertIn("--_fixed", mock_spawn.call_args.args[0])
             self.assertNotIn("--_cid", mock_spawn.call_args.args[0])
+
+            mock_spawn.reset_mock()
+            with mock.patch.object(self.es, "get_latest_conversation", return_value=("", "")):
+                self.es.main(["--open-remote"])
+                mock_spawn.assert_not_called()
 
 
 if __name__ == "__main__":

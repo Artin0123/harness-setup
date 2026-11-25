@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     同步 agy 個人環境設定：建立或更新自訂代理 (.md) 與 Skills／對話規則注入，並同步常用輔助腳本（latest_cid.py）至 ~\.gemini\config\scripts。
 .DESCRIPTION

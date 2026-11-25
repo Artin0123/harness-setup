@@ -94,8 +94,8 @@ def get_latest_conversation(db_path: Path | None = None) -> tuple[str, str]:
             con.close()
 
 
-def build_remote_url(session_id: str, cid: str = "", project_id: str = "") -> str:
-    if not cid:
+def build_remote_url(session_id: str, cid: str = "", project_id: str = "", fixed: bool = False) -> str:
+    if fixed:
         return REMOTE_URL
     inner = f"c/{cid}"
     if project_id:
@@ -107,11 +107,14 @@ def wait_and_open_remote(
     after_log: str = "",
     cid: str = "",
     project_id: str = "",
+    fixed: bool = False,
     log_dir: Path | None = None,
     timeout_sec: float = 20.0,
 ) -> None:
     import webbrowser
 
+    if not fixed and not cid:
+        return
     directory = log_dir or (Path.home() / ".gemini" / "antigravity-cli" / "log")
     deadline = time.monotonic() + timeout_sec
     while time.monotonic() < deadline:
@@ -128,7 +131,7 @@ def wait_and_open_remote(
                     continue
                 m = _REMOTE_CONNECTED_RE.search(text)
                 if m:
-                    webbrowser.open(build_remote_url(m.group(1), cid, project_id))
+                    webbrowser.open(build_remote_url(m.group(1), cid, project_id, fixed=fixed))
                     return
         time.sleep(0.25)
 
@@ -148,10 +151,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--_wait-remote", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--_cid", default="", help=argparse.SUPPRESS)
     parser.add_argument("--_pid", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--_fixed", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
     if args._wait_remote is not None:
-        wait_and_open_remote(args._wait_remote, cid=args._cid, project_id=args._pid)
+        wait_and_open_remote(args._wait_remote, cid=args._cid, project_id=args._pid, fixed=args._fixed)
         return
 
     if args.stop:
@@ -172,11 +176,17 @@ def main(argv: list[str] | None = None) -> None:
                 time.sleep(0.05)
 
     if args.open_remote is not None:
-        cid, project_id = get_latest_conversation() if args.open_remote == "latest" else ("", "")
+        is_fixed = args.open_remote == "fixed"
+        cid, project_id = ("", "") if is_fixed else get_latest_conversation()
+        if not is_fixed and not cid:
+            print("No resumable conversation found for --open-remote.", file=sys.stderr)
+            return
         log_dir = Path.home() / ".gemini" / "antigravity-cli" / "log"
         after_log = max((p.name for p in log_dir.glob("cli-*.log")), default="") if log_dir.is_dir() else ""
         wait_args = [str(Path(__file__).resolve()), "--_wait-remote", after_log]
-        if cid:
+        if is_fixed:
+            wait_args.append("--_fixed")
+        else:
             wait_args.extend(["--_cid", cid])
             if project_id:
                 wait_args.extend(["--_pid", project_id])
