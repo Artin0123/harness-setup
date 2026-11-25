@@ -2,6 +2,8 @@
 """Unit tests for agy-metrics/server.py (zero external dependencies)."""
 
 import json
+import sqlite3
+import sys
 import tempfile
 import threading
 import unittest
@@ -214,6 +216,78 @@ class TestServerCore(unittest.TestCase):
         finally:
             httpd.shutdown()
             httpd.server_close()
+
+
+class TestEnsureServer(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        hooks_dir = str(Path(__file__).resolve().parent / "hooks")
+        if hooks_dir not in sys.path:
+            sys.path.insert(0, hooks_dir)
+        import ensure_server as es  # noqa: E402
+        cls.es = es
+
+    def test_get_latest_conversation_id_skips_child_conversations(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "conversation_summaries.db"
+            con = sqlite3.connect(str(db_path))
+            try:
+                con.execute(
+                    "CREATE TABLE conversation_summaries ("
+                    "conversation_id TEXT PRIMARY KEY, "
+                    "last_modified_time DATETIME NOT NULL, "
+                    "parent_conversation_id TEXT NOT NULL DEFAULT '')"
+                )
+                con.executemany(
+                    "INSERT INTO conversation_summaries VALUES (?, ?, ?)",
+                    [
+                        ("aaaaaaaa-0000-0000-0000-000000000001", "2026-11-25 06:00:00+00:00", ""),
+                        ("bbbbbbbb-0000-0000-0000-000000000002", "2026-11-25 08:00:00+00:00", ""),
+                        ("cccccccc-0000-0000-0000-000000000003", "2026-11-25 09:00:00+00:00", "bbbbbbbb-0000-0000-0000-000000000002"),
+                    ],
+                )
+                con.commit()
+            finally:
+                con.close()
+            self.assertEqual(
+                self.es.get_latest_conversation_id(db_path),
+                "bbbbbbbb-0000-0000-0000-000000000002",
+            )
+
+    def test_get_latest_conversation_id_rejects_invalid_format(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "conversation_summaries.db"
+            con = sqlite3.connect(str(db_path))
+            try:
+                con.execute(
+                    "CREATE TABLE conversation_summaries ("
+                    "conversation_id TEXT PRIMARY KEY, "
+                    "last_modified_time DATETIME NOT NULL, "
+                    "parent_conversation_id TEXT NOT NULL DEFAULT '')"
+                )
+                con.execute(
+                    "INSERT INTO conversation_summaries VALUES (?, ?, ?)",
+                    ("bad; echo pwned", "2026-11-25 09:00:00+00:00", ""),
+                )
+                con.commit()
+            finally:
+                con.close()
+            self.assertEqual(self.es.get_latest_conversation_id(db_path), "")
+
+    def test_get_latest_conversation_id_missing_db_returns_empty(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.assertEqual(self.es.get_latest_conversation_id(Path(tmpdir) / "missing.db"), "")
+
+    def test_wait_and_open_remote_opens_url_when_new_pid_connects(self):
+        with (
+            mock.patch.object(self.es, "list_agy_pids", side_effect=[{100}, {100, 200}]),
+            mock.patch.object(self.es, "has_established_https", return_value=True) as mock_443,
+            mock.patch("time.sleep"),
+            mock.patch("webbrowser.open") as mock_open,
+        ):
+            self.es.wait_and_open_remote({100}, timeout_sec=5.0)
+            mock_443.assert_called_once_with({200})
+            mock_open.assert_called_once_with(self.es.REMOTE_URL)
 
 
 if __name__ == "__main__":

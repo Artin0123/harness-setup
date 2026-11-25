@@ -20,11 +20,11 @@ agy plugin install https://github.com/Artin0123/harness-setup/tree/master/agy/ag
 - **安裝油猴腳本**：開啟 [GitHub Raw 油猴腳本](https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/agy-metrics/agy-metrics-overlay.user.js) 直接安裝到 Tampermonkey（內建 `@updateURL` / `@downloadURL`，後續可一鍵檢查更新），之後開啟 Remote Control 頁面即可自動連線顯示。
 - **區網／手機連線**：啟動指令加上 `--lan` 改綁 `0.0.0.0:47891`（`POST /api/shutdown` 僅限本機 loopback 呼叫以確保安全）。
 
-### 選配：VS Code 快捷鍵一鍵啟動（偵測 Remote Control 就緒後自動開網頁 + `--lan`）
+### 選配：VS Code 快捷鍵一鍵啟動（自動接續最新對話 + 就緒後開網頁 + `--lan`）
 
 ```json
 "args": {
-  "text": "python \"$env:USERPROFILE\\.gemini\\config\\plugins\\agy-metrics\\hooks\\ensure_server.py\" --lan; $o=@(Get-Process agy -EA 0).Id; Start-Job { 1..80|%{ $p=Get-Process agy -EA 0|? Id -notin $using:o|select -First 1; if($p -and (Get-NetTCPConnection -OwningProcess $p.Id -RemotePort 443 -State Established -EA 0)){ Start-Sleep -Ms 500; Start-Process 'https://antigravity.google.com/remote?path=%2Fview%2Fremote-control'; break }; Start-Sleep -Ms 250 } } | Out-Null; agy -c --remote-control\r"
+  "text": "$id=python \"$env:USERPROFILE\\.gemini\\config\\plugins\\agy-metrics\\hooks\\ensure_server.py\" --lan --open-remote --latest-id; if($id){agy -r $id --remote-control}else{agy -c --remote-control}\r"
 }
 ```
 
