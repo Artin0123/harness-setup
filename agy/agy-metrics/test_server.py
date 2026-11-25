@@ -81,8 +81,6 @@ class TestServerCore(unittest.TestCase):
         self.assertEqual(row["cachedIn"], 8800)
         self.assertEqual(row["contextTokens"], 10000)
         self.assertEqual(row["maxContextTokens"], 512000)
-        self.assertEqual(row["think"], 150)
-        self.assertEqual(row["reply"], 350)
         self.assertEqual(row["totalOut"], 500)
         self.assertAlmostEqual(row["ttft"], 1.5, places=6)
         self.assertAlmostEqual(row["streaming"], 2.5, places=6)
@@ -90,9 +88,9 @@ class TestServerCore(unittest.TestCase):
 
     def test_group_by_turns_and_attach_turn_quotas(self):
         reqs = [
-            {"lastStepIndex": 1, "uncachedIn": 100, "cachedIn": 900, "think": 10, "reply": 40, "totalOut": 50, "ttft": 1.0, "streaming": 1.0},
-            {"lastStepIndex": 3, "uncachedIn": 200, "cachedIn": 800, "think": 20, "reply": 80, "totalOut": 100, "ttft": 0.5, "streaming": 1.5},
-            {"lastStepIndex": 12, "uncachedIn": 300, "cachedIn": 1700, "think": 50, "reply": 150, "totalOut": 200, "ttft": 2.0, "streaming": 2.0},
+            {"lastStepIndex": 1, "uncachedIn": 100, "cachedIn": 900, "totalOut": 50, "ttft": 1.0, "streaming": 1.0},
+            {"lastStepIndex": 3, "uncachedIn": 200, "cachedIn": 800, "totalOut": 100, "ttft": 0.5, "streaming": 1.5},
+            {"lastStepIndex": 12, "uncachedIn": 300, "cachedIn": 1700, "totalOut": 200, "ttft": 2.0, "streaming": 2.0},
         ]
         user_steps = [(0, "11/25 01:00"), (10, "11/25 01:05")]
         turns = server.group_by_turns(reqs, user_steps)
@@ -117,7 +115,7 @@ class TestServerCore(unittest.TestCase):
 
     def test_get_active_payload_new_cid_does_not_fallback(self):
         new_cid = "00000000-0000-0000-0000-000000000000"
-        payload = server.get_active_payload(requested_cid=new_cid, compact=True)
+        payload = server.get_active_payload(requested_cid=new_cid)
         self.assertEqual(payload["conversation"], {"id": new_cid})
         self.assertIsNone(payload["metrics"])
         self.assertEqual(payload["quota"]["convDeltas"], [])
@@ -138,8 +136,6 @@ class TestServerCore(unittest.TestCase):
                     "gemini-4-neon": {"quotaInfo": {"remainingFraction": 0.95, "resetTime": "2099-01-01T00:00:00Z"}},
                 }
             }
-            # 1st read -> expired, 2nd read (inside _try_cli_refresh_token before CLI) -> still expired,
-            # 3rd read (after trigger_agy_token_refresh) -> fresh token
             tokens = [
                 ("ya29.expired", "2020-01-01T00:00:00Z", "u@test"),
                 ("ya29.expired", "2020-01-01T00:00:00Z", "u@test"),
@@ -147,10 +143,10 @@ class TestServerCore(unittest.TestCase):
             ]
             with mock.patch.object(server, "read_oauth_token", side_effect=tokens), \
                  mock.patch.object(server, "trigger_agy_token_refresh", return_value=True) as cli_mock, \
-                 mock.patch.object(qt, "_post_v1", side_effect=[fake_401, fake_models, {}, {}]):
+                 mock.patch.object(qt, "_post_v1", side_effect=[fake_401, fake_models]):
                 self.assertTrue(qt.refresh(force=True))
                 cli_mock.assert_called_once()
-                st = qt.get_state(compact=True)
+                st = qt.get_state()
                 self.assertIsNone(st["error"])
                 self.assertEqual(st["version"], 1)
 
@@ -169,27 +165,25 @@ class TestServerCore(unittest.TestCase):
                  mock.patch.object(server, "trigger_agy_token_refresh", return_value=False), \
                  mock.patch.object(qt, "_post_v1", side_effect=fake_401):
                 self.assertFalse(qt.refresh(force=True))
-                st = qt.get_state(compact=True)
+                st = qt.get_state()
                 self.assertIn("Token 已過期", st["error"])
                 self.assertFalse(qt.has_new_token_while_errored())
 
-            # Same expired token within cooldown -> still blocked
             with mock.patch.object(server, "read_oauth_token", return_value=("ya29.expired", "2020-01-01T00:00:00Z", "u@test")), \
                  mock.patch.object(qt, "_post_v1") as post_mock:
                 self.assertFalse(qt.refresh(force=True))
                 post_mock.assert_not_called()
 
-            # New token appears immediately -> has_new_token_while_errored is True and refresh bypasses cooldown
             fake_models = {
                 "models": {
                     "gemini-4-neon": {"quotaInfo": {"remainingFraction": 0.95, "resetTime": "2099-01-01T00:00:00Z"}},
                 }
             }
             with mock.patch.object(server, "read_oauth_token", return_value=("ya29.fresh", "2099-01-01T00:00:00Z", "u@test")), \
-                 mock.patch.object(qt, "_post_v1", side_effect=[fake_models, {}, {}]):
+                 mock.patch.object(qt, "_post_v1", side_effect=[fake_models]):
                 self.assertTrue(qt.has_new_token_while_errored())
                 self.assertTrue(qt.refresh(force=True))
-                st = qt.get_state(compact=True)
+                st = qt.get_state()
                 self.assertIsNone(st["error"])
                 self.assertEqual(st["version"], 1)
                 self.assertFalse(qt.has_new_token_while_errored())
@@ -210,6 +204,7 @@ class TestServerCore(unittest.TestCase):
                 "/manifest.webmanifest",
                 "/api/conversations",
                 "/api/metrics?id=abc",
+                "/api/quota",
                 "/api/events",
             ):
                 with self.assertRaises(urllib.error.HTTPError) as ctx:

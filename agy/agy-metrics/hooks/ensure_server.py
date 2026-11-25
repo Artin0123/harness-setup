@@ -32,7 +32,6 @@ def stop_server(port: int) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--stop", action="store_true", help="Gracefully stop the background server")
-    parser.add_argument("--url", action="store_true", help="Print the backend URL to stdout")
     parser.add_argument("--lan", action="store_true", help="Bind to 0.0.0.0 for LAN access")
     args = parser.parse_args()
 
@@ -74,9 +73,6 @@ def main() -> None:
                 if is_listening(PORT):
                     break
                 time.sleep(0.05)
-
-    if args.url:
-        print(f"http://127.0.0.1:{PORT}")
 
 
 if __name__ == "__main__":

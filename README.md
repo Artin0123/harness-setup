@@ -27,7 +27,7 @@ Coding Agent 的環境修復設置合集。Windows 上以原生 PowerShell 為�
 
 ### agy-metrics（Antigravity CLI 插件）
 
-- **解決的問題**：`agy` CLI 與 `agy remote-control` 原生不顯示即時上下文佔用、快取命中率、TTFT、純串流速度（`tok/s`）、輪次統計與 5 小時額度扣減。本插件以零外部依賴的 Python 3 標準庫提供本地遙測後端（`http://127.0.0.1:47891`）搭配 Tampermonkey 油猴內嵌腳本，支援 `--lan` 區網／手機連線，並在所有 `agy.exe` 關閉後約 1 秒自動退出。詳見 [`agy/agy-metrics/README.md`](agy/agy-metrics/README.md)。
+- **解決的問題**：`agy` CLI 與 `agy remote-control` 原生不顯示即時上下文佔用、快取命中率、耗時、純串流速度（`tok/s`）、輪次統計與 5 小時額度扣減。本插件以零外部依賴的 Python 3 標準庫提供本地遙測後端（`http://127.0.0.1:47891`）搭配 Tampermonkey 油猴內嵌腳本，支援 `--lan` 區網／手機連線，並在所有 `agy.exe` 關閉後約 1 秒自動退出。詳見 [`agy/agy-metrics/README.md`](agy/agy-metrics/README.md)。
 
 ### agy-tools（Antigravity CLI 輔助腳本）
 

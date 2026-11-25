@@ -10,7 +10,7 @@
 - **主要用途**：專為 `agy` CLI 與 `agy remote-control` 設計的零依賴本地遙測後端搭配 Tampermonkey 油猴腳本（詳見 [`agy-metrics/README.md`](./agy-metrics/README.md)），直接解析本地 `conversations/*.db` 的 Protobuf 遙測資料並追蹤 5 小時模型額度扣減，無需安裝任何第三方套件。
 - **核心設計**：
   - **自動啟停**：由 `hooks.json` 的 `SessionStart` Hook 自動於背景啟動 `http://127.0.0.1:47891`，並在所有 `agy.exe` 關閉（如 `/exit`）後約 1 秒自動優雅退出。
-  - **內嵌上下文監控與輪次彙總**：透過 `agy-metrics-overlay.user.js` 直接嵌在 Remote Control 對話框模型選擇器右側，即時顯示上下文比例、快取命中率、TTFT／總耗時、純串流速度（`tok/s`）與 5 小時額度扣減，支援 `--lan` 區網與手機連線。
+  - **內嵌上下文監控與輪次彙總**：透過 `agy-metrics-overlay.user.js` 直接嵌在 Remote Control 對話框模型選擇器右側，即時顯示上下文比例、快取命中率、耗時、純串流速度（`tok/s`）與 5 小時額度扣減，支援 `--lan` 區網與手機連線。
 
 ### 2. `agy/login.ps1`（遠端裝置登入輔助）
 - **主要用途**：讓遠端連線裝置（例如透過手機 SSH 連進 Windows 電腦）能夠輕鬆完成 Google OAuth 登入。

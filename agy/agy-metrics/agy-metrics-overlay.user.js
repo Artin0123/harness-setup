@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         agy-metrics Remote Control 內嵌上下文監控
 // @namespace    https://github.com/Artin0123/harness-setup
-// @version      2.0.2
+// @version      2.0.3
 // @description  在 antigravity.google.com 對話框模型選擇器右側內嵌上下文進度環按鈕，即時顯示對話統計與 5h 額度消耗，支援手機橫向滑動、動態高度貼合標題欄與區網主機 IP 連線（連接本機或區網 agy-metrics；支援跨網域 iframe 與 Google Trusted Types）。
 // @match        https://antigravity.google.com/*
 // @match        https://antigravity.static.usercontent.goog/*
@@ -250,7 +250,7 @@
       flex-direction: column;
     }
     .table-inner {
-      min-width: 780px;
+      min-width: 700px;
       flex: 1;
       min-height: 0;
       display: flex;
@@ -296,12 +296,12 @@
     .table-foot td { font-weight: 700; color: #f1f5f9; }
 
     col:nth-child(1) { width: 10%; }
-    col:nth-child(2) { width: 20%; }
-    col:nth-child(3) { width: 9%; }
-    col:nth-child(4) { width: 19%; }
+    col:nth-child(2) { width: 13%; }
+    col:nth-child(3) { width: 10%; }
+    col:nth-child(4) { width: 22%; }
     col:nth-child(5) { width: 11%; }
-    col:nth-child(6) { width: 16%; }
-    col:nth-child(7) { width: 15%; }
+    col:nth-child(6) { width: 18%; }
+    col:nth-child(7) { width: 16%; }
 
     .host-box {
       background: #171a23;
@@ -633,11 +633,8 @@
       });
     });
 
-  const buildActiveUrl = (base) => {
-    const qs = new URLSearchParams({ compact: '1' });
-    if (currentConvId) qs.set('id', currentConvId);
-    return `${base}/api/active?${qs.toString()}`;
-  };
+  const buildActiveUrl = (base) =>
+    currentConvId ? `${base}/api/active?id=${encodeURIComponent(currentConvId)}` : `${base}/api/active`;
 
   const submitCustomHost = async () => {
     const base = normalizeHostToBase(hostInputDraft);
@@ -766,7 +763,7 @@
         h('thead', null,
           h('tr', null,
             h('th', null, '請求數'),
-            h('th', null, 'TTFT / 耗時'),
+            h('th', null, '耗時'),
             h('th', null, 'TPS'),
             h('th', null, '輸入 (已快取)'),
             h('th', null, '輸出'),
@@ -785,7 +782,7 @@
             ? turns.map((tr) =>
                 h('tr', null,
                   h('td', null, String(tr.requestCount)),
-                  h('td', null, `${fmtSec(tr.ttftSum)} / ${fmtSec(tr.durSum)}`),
+                  h('td', null, fmtSec(tr.durSum)),
                   h('td', null, tr.tps ? tr.tps.toFixed(1) : '—'),
                   h('td', null, `${fmtTok(tr.totalIn)} (${fmtTok(tr.cachedIn)})`),
                   h('td', null, fmtTok(tr.totalOut)),
@@ -804,7 +801,7 @@
         h('tbody', null,
           h('tr', null,
             h('td', null, t ? String(t.requests) : '0'),
-            h('td', null, t ? `${fmtSec(t.ttftSum)} / ${fmtSec(t.durSum)}` : '—'),
+            h('td', null, t ? fmtSec(t.durSum) : '—'),
             h('td', null, t && t.tps ? t.tps.toFixed(1) : '—'),
             h('td', null, t ? `${fmtTok(t.totalIn)} (${fmtTok(t.cachedIn)})` : '—'),
             h('td', null, t ? fmtTok(t.totalOut) : '—'),
