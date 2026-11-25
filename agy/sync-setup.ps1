@@ -108,7 +108,7 @@ tools:
   # - search_web
   # - generate_image
   # --- 互動提問與進度 ---
-  - ask_question
+  # - ask_question
   # - update_steps
   # --- 子代理與排程 (已驗證可用，依需求取消註解) ---
   # - define_subagent
