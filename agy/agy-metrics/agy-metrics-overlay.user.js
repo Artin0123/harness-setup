@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         agy-metrics Remote Control 內嵌上下文監控
 // @namespace    https://github.com/Artin0123/harness-setup
-// @version      2.1.1
+// @version      2.1.3
 // @description  在 antigravity.google.com 對話框模型選擇器右側內嵌上下文進度環按鈕，即時顯示對話統計與 5h 額度消耗，支援手機橫向滑動、動態高度貼合標題欄與區網主機 IP 連線（連接本機或區網 agy-metrics；支援跨網域 iframe 與 Google Trusted Types）。
 // @updateURL    https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/agy-metrics/agy-metrics-overlay.user.js
 // @downloadURL  https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/agy-metrics/agy-metrics-overlay.user.js
@@ -230,49 +230,14 @@
     .kv {
       display: flex;
       justify-content: space-between;
-      align-items: center;
+      align-items: baseline;
       gap: 10px;
       font-size: 14px;
       line-height: 1.5;
       min-width: 0;
     }
-    .kv-k {
-      color: #b6bfd3;
-      flex-shrink: 0;
-      white-space: nowrap;
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-    }
+    .kv-k { color: #b6bfd3; flex-shrink: 0; white-space: nowrap; }
     .kv-v { color: #e6e9f0; font-weight: 600; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-
-    .compact-btn {
-      border: none;
-      background: transparent;
-      color: #fb923c;
-      font-family: inherit;
-      font-size: inherit;
-      font-weight: 600;
-      line-height: inherit;
-      padding: 0;
-      margin: 0;
-      cursor: pointer;
-      transition: color 0.15s ease, opacity 0.15s ease;
-    }
-    .compact-btn:hover:not(:disabled) {
-      color: #fdba74;
-    }
-    .compact-btn.confirm {
-      color: #ff6b6b;
-    }
-    .compact-btn.confirm:hover:not(:disabled) {
-      color: #fca5a5;
-    }
-    .compact-btn:disabled {
-      color: #94a3b8;
-      cursor: not-allowed;
-      opacity: 0.75;
-    }
 
     .table-box {
       flex: 1;
@@ -444,20 +409,6 @@
   let lastRenderKey = '';
   let fetchGen = 0;
   let observedComposer = null;
-  let compactState = 'idle'; // 'idle' | 'confirm' | 'running'
-  let compactConvId = '';
-  let compactErr = '';
-  let compactConfirmTimer = null;
-
-  const resetCompactConfirm = () => {
-    if (compactConfirmTimer) {
-      clearTimeout(compactConfirmTimer);
-      compactConfirmTimer = null;
-    }
-    if (compactState === 'confirm') {
-      compactState = 'idle';
-    }
-  };
 
   const emptyActiveData = (cid = '', quota = null) => ({
     conversation: cid ? { id: cid } : null,
@@ -551,8 +502,6 @@
       lastRenderKey = '';
       render();
       positionPanel();
-    } else {
-      resetCompactConfirm();
     }
   };
 
@@ -586,8 +535,6 @@
     const cid = extractConvId();
     if (cid !== currentConvId) {
       currentConvId = cid;
-      resetCompactConfirm();
-      compactErr = '';
       if (!cid) {
         if (activeBase) {
           lastData = emptyActiveData('', lastData?.quota);
@@ -666,73 +613,27 @@
   const makeColgroup = () =>
     h('colgroup', null, h('col'), h('col'), h('col'), h('col'), h('col'), h('col'), h('col'));
 
-  const gmReqJson = (method, url, timeout = 4000) =>
+  const gmGetJson = (url, timeout = 4000) =>
     new Promise((resolve) => {
       GM_xmlhttpRequest({
-        method,
+        method: 'GET',
         url,
         timeout,
         onload: (res) => {
-          let parsed = null;
-          try { parsed = JSON.parse(res.responseText); } catch {}
           if (res.status >= 200 && res.status < 300) {
-            resolve(parsed != null ? { ok: true, data: parsed } : { ok: false, error: '回傳格式錯誤' });
+            try {
+              resolve({ ok: true, data: JSON.parse(res.responseText) });
+            } catch {
+              resolve({ ok: false, error: '回傳格式錯誤' });
+            }
           } else {
-            resolve({ ok: false, error: parsed?.error || `HTTP ${res.status}`, data: parsed });
+            resolve({ ok: false, error: `HTTP ${res.status}` });
           }
         },
         onerror: () => resolve({ ok: false, error: '無法連線到目標主機' }),
         ontimeout: () => resolve({ ok: false, error: '連線逾時' }),
       });
     });
-
-  const gmGetJson = (url, timeout = 4000) => gmReqJson('GET', url, timeout);
-  const gmPostJson = (url, timeout = 120000) => gmReqJson('POST', url, timeout);
-
-  const handleCompactClick = async () => {
-    if (!activeBase || !currentConvId || compactState === 'running') return;
-    if (compactState === 'idle') {
-      compactState = 'confirm';
-      compactErr = '';
-      if (compactConfirmTimer) clearTimeout(compactConfirmTimer);
-      compactConfirmTimer = setTimeout(() => {
-        compactConfirmTimer = null;
-        if (compactState === 'confirm') {
-          compactState = 'idle';
-          render();
-        }
-      }, 5000);
-      render();
-      return;
-    }
-
-    if (compactConfirmTimer) {
-      clearTimeout(compactConfirmTimer);
-      compactConfirmTimer = null;
-    }
-    const targetCid = currentConvId;
-    const baseSnap = activeBase;
-    compactState = 'running';
-    compactConvId = targetCid;
-    compactErr = '';
-    render();
-
-    const res = await gmPostJson(`${baseSnap}/api/compact?id=${encodeURIComponent(targetCid)}`, 130000);
-    compactState = 'idle';
-    compactConvId = '';
-    if (res.ok && res.data?.ok) {
-      compactErr = '';
-      render();
-      if (res.data.restartedDaemon) {
-        setTimeout(() => location.reload(), 1500);
-      } else if (activeBase === baseSnap) {
-        fetchActive();
-      }
-    } else {
-      compactErr = res.error || '壓縮失敗';
-      render();
-    }
-  };
 
   const buildActiveUrl = (base) =>
     currentConvId ? `${base}/api/active?id=${encodeURIComponent(currentConvId)}` : `${base}/api/active`;
@@ -827,10 +728,8 @@
     if (!isOpen) return;
 
     const convId = lastData.conversation?.id || '';
-    const displayErr = compactErr || q.error || '';
-    const isRunningThis = compactState === 'running' && compactConvId === convId;
-    const btnState = isRunningThis ? 'running' : (compactState === 'confirm' ? 'confirm' : 'idle');
-    const renderKey = `${convId}|${m?.mtimeMs || 0}|${t?.requests || 0}|${q.convTotalDeltaPct ?? ''}|${displayErr}|${btnState}`;
+    const displayErr = q.error || '';
+    const renderKey = `${convId}|${m?.mtimeMs || 0}|${t?.requests || 0}|${q.convTotalDeltaPct ?? ''}|${displayErr}`;
     if (renderKey === lastRenderKey) return;
     lastRenderKey = renderKey;
 
@@ -846,26 +745,11 @@
     if (displayErr) children.push(h('div', { className: 'err-banner' }, displayErr));
 
     const convDeltaTotal = q.convTotalDeltaPct;
-    const canCompact = Boolean(convId && l);
-    const compactBtn = canCompact
-      ? h('button', {
-          type: 'button',
-          className: `compact-btn${btnState === 'confirm' ? ' confirm' : ''}`,
-          disabled: compactState === 'running',
-          onClick: (e) => {
-            e.stopPropagation();
-            handleCompactClick();
-          },
-        }, btnState === 'running' ? '正在壓縮' : (btnState === 'confirm' ? '確認壓縮' : '壓縮'))
-      : null;
 
     children.push(
       h('div', { className: 'summary-wrap' },
         h('div', { className: 'sub-card' },
-          kvRow(
-            compactBtn ? ['已用上下文', compactBtn] : '已用上下文',
-            l ? h('span', { className: pctClass(ctxPct) }, fmtTok(l.contextTokens)) : '—'
-          ),
+          kvRow('已用上下文', l ? h('span', { className: pctClass(ctxPct) }, fmtTok(l.contextTokens)) : '—'),
           kvRow('上下文上限', l?.maxContextTokens ? fmtTok(l.maxContextTokens) : '—')
         ),
         h('div', { className: 'sub-card' },

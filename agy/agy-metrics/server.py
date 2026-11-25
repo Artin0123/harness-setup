@@ -466,80 +466,6 @@ def trigger_agy_token_refresh(timeout: float = 12.0) -> bool:
         return False
 
 
-_COMPACT_LOCK = threading.Lock()
-_COMPACT_STATE_LOCK = threading.Lock()
-_COMPACT_IN_PROGRESS = False
-_COMPACT_GRACE_UNTIL = 0.0
-
-
-def _run_agy_hidden(exe: str, args: list[str], timeout: float = 30.0) -> subprocess.CompletedProcess:
-    kwargs: dict = {
-        "stdin": subprocess.DEVNULL,
-        "stdout": subprocess.PIPE,
-        "stderr": subprocess.PIPE,
-        "text": True,
-        "encoding": "utf-8",
-        "errors": "replace",
-        "timeout": timeout,
-    }
-    if os.name == "nt":
-        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-    return subprocess.run([exe, *args], **kwargs)
-
-
-def _win32_get_cmdline(pid: int) -> str:
-    """Read a process's CommandLine via Win32 PEB (zero subprocesses, no Admin needed)."""
-    class UNICODE_STRING(ctypes.Structure):
-        _fields_ = [("Length", wt.USHORT), ("MaximumLength", wt.USHORT), ("Buffer", ctypes.c_void_p)]
-
-    class PBI(ctypes.Structure):
-        _fields_ = [
-            ("Reserved1", ctypes.c_void_p),
-            ("PebBaseAddress", ctypes.c_void_p),
-            ("Reserved2", ctypes.c_void_p * 2),
-            ("UniqueProcessId", ctypes.c_size_t),
-            ("Reserved3", ctypes.c_void_p),
-        ]
-
-    k32 = ctypes.windll.kernel32
-    nt = ctypes.windll.ntdll
-    k32.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
-    k32.OpenProcess.restype = wt.HANDLE
-    k32.ReadProcessMemory.argtypes = [
-        wt.HANDLE, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)
-    ]
-    k32.ReadProcessMemory.restype = wt.BOOL
-    k32.CloseHandle.argtypes = [wt.HANDLE]
-    k32.CloseHandle.restype = wt.BOOL
-
-    h = k32.OpenProcess(0x1010, False, pid)
-    if not h:
-        return ""
-    try:
-        pbi = PBI()
-        if nt.NtQueryInformationProcess(h, 0, ctypes.byref(pbi), ctypes.sizeof(pbi), None) != 0 or not pbi.PebBaseAddress:
-            return ""
-        params_ptr = ctypes.c_void_p()
-        read = ctypes.c_size_t()
-        if not k32.ReadProcessMemory(h, pbi.PebBaseAddress + 0x20, ctypes.byref(params_ptr), ctypes.sizeof(params_ptr), ctypes.byref(read)):
-            return ""
-        if not params_ptr.value:
-            return ""
-        us = UNICODE_STRING()
-        if not k32.ReadProcessMemory(h, params_ptr.value + 0x70, ctypes.byref(us), ctypes.sizeof(us), ctypes.byref(read)):
-            return ""
-        if not us.Length or not us.Buffer:
-            return ""
-        buf = (wt.WCHAR * (us.Length // 2))()
-        if not k32.ReadProcessMemory(h, us.Buffer, buf, us.Length, ctypes.byref(read)):
-            return ""
-        return buf.value
-    except Exception:
-        return ""
-    finally:
-        k32.CloseHandle(h)
-
-
 def _win32_list_agy_pids() -> list[int]:
     """Return PIDs of all running agy.exe processes via Win32 Toolhelp32 snapshot."""
     TH32CS_SNAPPROCESS = 0x00000002
@@ -585,135 +511,6 @@ def _win32_list_agy_pids() -> list[int]:
     finally:
         k32.CloseHandle(snap)
     return pids
-
-
-def find_remote_control_serve_pids() -> list[int]:
-    if os.name != "nt":
-        return []
-    out = []
-    for pid in _win32_list_agy_pids():
-        cmd = _win32_get_cmdline(pid).lower()
-        if "remote-control" in cmd and "serve" in cmd:
-            out.append(pid)
-    return out
-
-
-def start_remote_control_serve(exe: str) -> bool:
-    """Start `agy remote-control serve` with a hidden console (CREATE_NO_WINDOW) so child git.exe calls never flash."""
-    try:
-        if os.name == "nt":
-            flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
-            subprocess.Popen(
-                [exe, "remote-control", "serve"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=flags,
-                close_fds=True,
-            )
-            return True
-        subprocess.Popen(
-            [exe, "remote-control", "serve"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-            close_fds=True,
-        )
-        return True
-    except Exception:
-        return False
-
-
-def stop_remote_control_serve_pids(pids: list[int]) -> None:
-    if os.name != "nt" or not pids:
-        return
-    k32 = ctypes.windll.kernel32
-    k32.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
-    k32.OpenProcess.restype = wt.HANDLE
-    k32.TerminateProcess.argtypes = [wt.HANDLE, wt.UINT]
-    k32.TerminateProcess.restype = wt.BOOL
-    k32.CloseHandle.argtypes = [wt.HANDLE]
-    k32.CloseHandle.restype = wt.BOOL
-    for pid in pids:
-        h = k32.OpenProcess(0x0001, False, pid)  # PROCESS_TERMINATE
-        if h:
-            try:
-                k32.TerminateProcess(h, 0)
-            finally:
-                k32.CloseHandle(h)
-    deadline = time.time() + 3.0
-    while time.time() < deadline:
-        if not find_remote_control_serve_pids():
-            break
-        time.sleep(0.1)
-
-
-def is_remote_control_daemon_running(exe: str) -> bool:
-    if os.name == "nt":
-        return bool(find_remote_control_serve_pids())
-    try:
-        res = _run_agy_hidden(exe, ["remote-control", "status"], timeout=10.0)
-        out = ((res.stdout or "") + "\n" + (res.stderr or "")).lower()
-        return "running" in out and "not registered" not in out
-    except Exception:
-        return False
-
-
-def restart_remote_control_daemon(exe: str) -> bool:
-    if os.name == "nt":
-        pids = find_remote_control_serve_pids()
-        stop_remote_control_serve_pids(pids)
-        return start_remote_control_serve(exe)
-    try:
-        _run_agy_hidden(exe, ["remote-control", "stop"], timeout=15.0)
-        res = _run_agy_hidden(exe, ["remote-control", "start", "--session"], timeout=20.0)
-        return res.returncode == 0
-    except Exception:
-        return False
-
-
-def compact_conversation(cid: str) -> tuple[int, dict]:
-    """Run headless `/compact` on a conversation and reload remote-control daemon if active."""
-    global _COMPACT_IN_PROGRESS, _COMPACT_GRACE_UNTIL
-    clean_cid = (cid or "").strip().lower()
-    if not is_valid_cid(clean_cid):
-        return (400, {"ok": False, "error": "無效的對話 ID"})
-    db_path = BASE_DIR / "conversations" / f"{clean_cid}.db"
-    if not db_path.is_file():
-        return (404, {"ok": False, "error": "找不到對應的對話資料庫"})
-    exe = find_agy_executable()
-    if not exe:
-        return (500, {"ok": False, "error": "找不到 agy 執行檔"})
-
-    if not _COMPACT_LOCK.acquire(blocking=False):
-        return (409, {"ok": False, "error": "已有壓縮作業進行中，請稍候"})
-
-    with _COMPACT_STATE_LOCK:
-        _COMPACT_IN_PROGRESS = True
-    try:
-        res = _run_agy_hidden(exe, ["-r", clean_cid, "-p", "/compact"], timeout=120.0)
-        if res.returncode != 0:
-            detail = (res.stderr or res.stdout or "").strip().splitlines()
-            msg = detail[-1][:120] if detail else f"exit code {res.returncode}"
-            return (500, {"ok": False, "error": f"壓縮失敗：{msg}"})
-
-        with _CONV_CACHE_LOCK:
-            _CONV_CACHE.pop(clean_cid, None)
-
-        restarted = False
-        if is_remote_control_daemon_running(exe):
-            restarted = restart_remote_control_daemon(exe)
-        return (200, {"ok": True, "restartedDaemon": restarted})
-    except subprocess.TimeoutExpired:
-        return (504, {"ok": False, "error": "壓縮逾時（超過 120 秒）"})
-    except Exception as e:
-        return (500, {"ok": False, "error": f"壓縮失敗：{e}"})
-    finally:
-        with _COMPACT_STATE_LOCK:
-            _COMPACT_IN_PROGRESS = False
-            _COMPACT_GRACE_UNTIL = time.time() + 8.0
-        _COMPACT_LOCK.release()
 
 
 def model_to_bucket(model_name: str) -> str:
@@ -1202,19 +999,13 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, "text/plain; charset=utf-8", b"Not Found")
 
     def do_POST(self):
-        parsed = urlparse(self.path)
-        qs = parse_qs(parsed.query)
-        if parsed.path == "/api/shutdown":
+        if urlparse(self.path).path == "/api/shutdown":
             client_ip = (self.client_address[0] if self.client_address else "")
             if client_ip not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
                 self._send(403, "application/json; charset=utf-8", b'{"error":"loopback only"}')
                 return
             self._send(200, "application/json; charset=utf-8", b'{"ok":true}')
             threading.Thread(target=self.server.shutdown, daemon=True).start()
-        elif parsed.path == "/api/compact":
-            cid = qs.get("id", [""])[0]
-            code, payload = compact_conversation(cid)
-            self._send(code, "application/json; charset=utf-8", json.dumps(payload, ensure_ascii=False).encode("utf-8"))
         else:
             self._send(404, "text/plain; charset=utf-8", b"Not Found")
 
@@ -1234,10 +1025,6 @@ def watch_agy_exit(server: ThreadingHTTPServer) -> None:
     saw_agy = False
     while True:
         time.sleep(1)
-        with _COMPACT_STATE_LOCK:
-            if _COMPACT_IN_PROGRESS or time.time() < _COMPACT_GRACE_UNTIL:
-                saw_agy = True
-                continue
         if is_agy_running():
             saw_agy = True
         elif saw_agy or (time.time() - started_at > 10):
