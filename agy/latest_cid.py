@@ -1,12 +1,8 @@
 #!/usr/bin/env python3
-"""Launch agy resuming the latest top-level conversation, forwarding extra CLI arguments."""
+"""Print the latest top-level agy conversation ID and exit immediately."""
 
-import os
 import re
-import shutil
-import signal
 import sqlite3
-import subprocess
 import sys
 from pathlib import Path
 
@@ -35,25 +31,13 @@ def get_latest_conversation_id(db_path: Path | None = None) -> str:
             con.close()
 
 
-def main(argv: list[str] | None = None) -> int:
-    extra_args = sys.argv[1:] if argv is None else argv
+def main() -> int:
     cid = get_latest_conversation_id()
     if not cid:
         print("No resumable conversation found.", file=sys.stderr)
         return 1
-
-    agy = shutil.which("agy")
-    if not agy:
-        print("agy executable not found in PATH.", file=sys.stderr)
-        return 127
-
-    cmd = [agy, "-r", cid, *extra_args]
-
-    if os.name != "nt":
-        os.execvp(agy, cmd)
-
-    signal.signal(signal.SIGINT, signal.SIG_IGN)
-    return subprocess.call(cmd)
+    print(cid)
+    return 0
 
 
 if __name__ == "__main__":

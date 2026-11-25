@@ -1,11 +1,11 @@
 ﻿<#
 .SYNOPSIS
-    同步 agy 個人環境設定：建立或更新自訂代理 (.md) 與 Skills／對話規則注入，並同步常用輔助腳本（resume_latest.py）至 ~\.gemini\config\scripts。
+    同步 agy 個人環境設定：建立或更新自訂代理 (.md) 與 Skills／對話規則注入，並同步常用輔助腳本（latest_cid.py）至 ~\.gemini\config\scripts。
 .DESCRIPTION
     - 若目標 ~/.gemini/config/agents/<agent>.md 不存在，會自動建立標準範本（含生成指令註解、excludeDefaultComponents: true 與已驗證可用的 tools 清單）。
     - 若檔案已存在，則保留既有的 YAML Frontmatter 與自訂系統提示詞正文，僅冪等更新尾端的 <conversation_transcript> 與 <skills> 區塊。
     - agy 1.5.16+ 已原生掃描 ~/.agents/skills/*/SKILL.md，不需要複製鏡像到 ~/.gemini/config/skills。
-    - 同步 agy/resume_latest.py 到 ~/.gemini/config/scripts/resume_latest.py（本地優先複製，遠端 irm|iex 則從 GitHub Raw 下載）。
+    - 同步 agy/latest_cid.py 到 ~/.gemini/config/scripts/latest_cid.py（本地優先複製，遠端 irm|iex 則從 GitHub Raw 下載）。
 .EXAMPLE
     pwsh -Command "irm https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/sync-setup.ps1 | iex"
     pwsh -File .\agy\sync-setup.ps1 -Agents build
@@ -25,7 +25,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $OneLinerCmd = 'pwsh -Command "irm https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/sync-setup.ps1 | iex"'
-$ResumeScriptRawUrl = 'https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/resume_latest.py'
+$LatestCidRawUrl = 'https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/latest_cid.py'
 
 function Parse-SkillFrontmatter {
     param([string]$SkillMdPath)
@@ -270,20 +270,20 @@ foreach ($agentName in ($Agents | ForEach-Object { $_ -split ',' } | ForEach-Obj
     }
 }
 
-# 4. 同步輔助腳本 resume_latest.py 到 ~/.gemini/config/scripts
-$resumeDest = Join-Path $ScriptsDir "resume_latest.py"
-$localResumeSrc = if ($PSScriptRoot) { Join-Path $PSScriptRoot "resume_latest.py" } else { $null }
+# 4. 同步輔助腳本 latest_cid.py 到 ~/.gemini/config/scripts
+$latestCidDest = Join-Path $ScriptsDir "latest_cid.py"
+$localLatestCidSrc = if ($PSScriptRoot) { Join-Path $PSScriptRoot "latest_cid.py" } else { $null }
 if ($DryRun) {
-    $srcLabel = if ($localResumeSrc -and (Test-Path -LiteralPath $localResumeSrc)) { $localResumeSrc } else { $ResumeScriptRawUrl }
-    Write-Host "[DryRun] $resumeDest <- $srcLabel" -ForegroundColor Yellow
+    $srcLabel = if ($localLatestCidSrc -and (Test-Path -LiteralPath $localLatestCidSrc)) { $localLatestCidSrc } else { $LatestCidRawUrl }
+    Write-Host "[DryRun] $latestCidDest <- $srcLabel" -ForegroundColor Yellow
 } else {
     if (-not (Test-Path $ScriptsDir)) {
         New-Item -ItemType Directory -Path $ScriptsDir -Force | Out-Null
     }
-    if ($localResumeSrc -and (Test-Path -LiteralPath $localResumeSrc)) {
-        Copy-Item -LiteralPath $localResumeSrc -Destination $resumeDest -Force
+    if ($localLatestCidSrc -and (Test-Path -LiteralPath $localLatestCidSrc)) {
+        Copy-Item -LiteralPath $localLatestCidSrc -Destination $latestCidDest -Force
     } else {
-        Invoke-WebRequest -Uri $ResumeScriptRawUrl -OutFile $resumeDest -UseBasicParsing
+        Invoke-WebRequest -Uri $LatestCidRawUrl -OutFile $latestCidDest -UseBasicParsing
     }
-    Write-Host "[OK] $resumeDest -> 已同步最新對話接續腳本" -ForegroundColor Green
+    Write-Host "[OK] $latestCidDest -> 已同步最新對話 ID 查詢腳本" -ForegroundColor Green
 }

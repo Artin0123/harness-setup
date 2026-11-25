@@ -22,7 +22,7 @@ agy plugin install https://github.com/Artin0123/harness-setup/tree/master/agy/ag
 
 ### 選配：VS Code 快捷鍵一鍵啟動（自動接續最新對話 + 就緒後直達網頁 + `--lan`）
 
-先透過一行指令同步 `resume_latest.py` 到 `~\.gemini\config\scripts\resume_latest.py`（純 CLI 亦可單獨執行用於 `/compact` 等操作）：
+先透過一行指令同步 `latest_cid.py` 到 `~\.gemini\config\scripts\latest_cid.py`（純 CLI 亦可單獨執行 `agy -r (python "$env:USERPROFILE\.gemini\config\scripts\latest_cid.py")` 用於 `/compact` 等操作）：
 
 ```powershell
 irm https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/sync-setup.ps1 | iex
@@ -32,7 +32,7 @@ irm https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/sync-se
 
 ```json
 "args": {
-  "text": "python \"$env:USERPROFILE\\.gemini\\config\\plugins\\agy-metrics\\hooks\\ensure_server.py\" --lan --open-remote; python \"$env:USERPROFILE\\.gemini\\config\\scripts\\resume_latest.py\" --remote-control\r"
+  "text": "python \"$env:USERPROFILE\\.gemini\\config\\plugins\\agy-metrics\\hooks\\ensure_server.py\" --lan --open-remote; agy -r (python \"$env:USERPROFILE\\.gemini\\config\\scripts\\latest_cid.py\") --remote-control\r"
 }
 ```
 
