@@ -227,7 +227,7 @@ class TestEnsureServer(unittest.TestCase):
         import ensure_server as es  # noqa: E402
         cls.es = es
 
-    def test_get_latest_conversation_id_skips_child_conversations(self):
+    def test_get_latest_conversation_skips_child_conversations(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "conversation_summaries.db"
             con = sqlite3.connect(str(db_path))
@@ -235,26 +235,27 @@ class TestEnsureServer(unittest.TestCase):
                 con.execute(
                     "CREATE TABLE conversation_summaries ("
                     "conversation_id TEXT PRIMARY KEY, "
+                    "project_id TEXT NOT NULL DEFAULT '', "
                     "last_modified_time DATETIME NOT NULL, "
                     "parent_conversation_id TEXT NOT NULL DEFAULT '')"
                 )
                 con.executemany(
-                    "INSERT INTO conversation_summaries VALUES (?, ?, ?)",
+                    "INSERT INTO conversation_summaries VALUES (?, ?, ?, ?)",
                     [
-                        ("aaaaaaaa-0000-0000-0000-000000000001", "2026-11-25 06:00:00+00:00", ""),
-                        ("bbbbbbbb-0000-0000-0000-000000000002", "2026-11-25 08:00:00+00:00", ""),
-                        ("cccccccc-0000-0000-0000-000000000003", "2026-11-25 09:00:00+00:00", "bbbbbbbb-0000-0000-0000-000000000002"),
+                        ("aaaaaaaa-0000-0000-0000-000000000001", "11111111-0000-0000-0000-000000000001", "2026-11-25 06:00:00+00:00", ""),
+                        ("bbbbbbbb-0000-0000-0000-000000000002", "22222222-0000-0000-0000-000000000002", "2026-11-25 08:00:00+00:00", ""),
+                        ("cccccccc-0000-0000-0000-000000000003", "22222222-0000-0000-0000-000000000002", "2026-11-25 09:00:00+00:00", "bbbbbbbb-0000-0000-0000-000000000002"),
                     ],
                 )
                 con.commit()
             finally:
                 con.close()
             self.assertEqual(
-                self.es.get_latest_conversation_id(db_path),
-                "bbbbbbbb-0000-0000-0000-000000000002",
+                self.es.get_latest_conversation(db_path),
+                ("bbbbbbbb-0000-0000-0000-000000000002", "22222222-0000-0000-0000-000000000002"),
             )
 
-    def test_get_latest_conversation_id_rejects_invalid_format(self):
+    def test_get_latest_conversation_rejects_invalid_format(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "conversation_summaries.db"
             con = sqlite3.connect(str(db_path))
@@ -262,32 +263,82 @@ class TestEnsureServer(unittest.TestCase):
                 con.execute(
                     "CREATE TABLE conversation_summaries ("
                     "conversation_id TEXT PRIMARY KEY, "
+                    "project_id TEXT NOT NULL DEFAULT '', "
                     "last_modified_time DATETIME NOT NULL, "
                     "parent_conversation_id TEXT NOT NULL DEFAULT '')"
                 )
                 con.execute(
-                    "INSERT INTO conversation_summaries VALUES (?, ?, ?)",
-                    ("bad; echo pwned", "2026-11-25 09:00:00+00:00", ""),
+                    "INSERT INTO conversation_summaries VALUES (?, ?, ?, ?)",
+                    ("bad; echo pwned", "", "2026-11-25 09:00:00+00:00", ""),
                 )
                 con.commit()
             finally:
                 con.close()
-            self.assertEqual(self.es.get_latest_conversation_id(db_path), "")
+            self.assertEqual(self.es.get_latest_conversation(db_path), ("", ""))
 
-    def test_get_latest_conversation_id_missing_db_returns_empty(self):
+    def test_get_latest_conversation_missing_db_returns_empty(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            self.assertEqual(self.es.get_latest_conversation_id(Path(tmpdir) / "missing.db"), "")
+            self.assertEqual(self.es.get_latest_conversation(Path(tmpdir) / "missing.db"), ("", ""))
 
-    def test_wait_and_open_remote_opens_url_when_new_pid_connects(self):
+    def test_build_remote_url(self):
+        self.assertEqual(self.es.build_remote_url("7c598ac2-f03d-4548-a073-aad41497bcc6-v2"), self.es.REMOTE_URL)
+        self.assertEqual(
+            self.es.build_remote_url(
+                "7c598ac2-f03d-4548-a073-aad41497bcc6-v2",
+                "51019dc7-497c-46f1-a9b0-3326b303304a",
+                "9c8f0368-9c1b-41b4-8e87-ae309004fe68",
+            ),
+            "https://antigravity.google.com/r/7c598ac2-f03d-4548-a073-aad41497bcc6-v2"
+            "?p=c%2F51019dc7-497c-46f1-a9b0-3326b303304a%3Fproject%3D9c8f0368-9c1b-41b4-8e87-ae309004fe68",
+        )
+
+    def test_wait_and_open_remote_reads_new_log_and_opens_direct_url(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            (log_dir / "cli-20261125_160000.log").write_text(
+                "[remote-control-00000000-0000-0000-0000-000000000000-v2] Connection status: Connected\n",
+                encoding="utf-8",
+            )
+            (log_dir / "cli-20261125_163251.log").write_text(
+                "I1125 16:32:52.950144 734 remote_control_v2.go:2235] "
+                "[remote-control-7c598ac2-f03d-4548-a073-aad41497bcc6-v2] Connection status: Connected\n",
+                encoding="utf-8",
+            )
+            with mock.patch("time.sleep"), mock.patch("webbrowser.open") as mock_open:
+                self.es.wait_and_open_remote(
+                    "cli-20261125_160000.log",
+                    cid="51019dc7-497c-46f1-a9b0-3326b303304a",
+                    project_id="9c8f0368-9c1b-41b4-8e87-ae309004fe68",
+                    log_dir=log_dir,
+                    timeout_sec=5.0,
+                )
+                mock_open.assert_called_once_with(
+                    "https://antigravity.google.com/r/7c598ac2-f03d-4548-a073-aad41497bcc6-v2"
+                    "?p=c%2F51019dc7-497c-46f1-a9b0-3326b303304a%3Fproject%3D9c8f0368-9c1b-41b4-8e87-ae309004fe68"
+                )
+
+    def test_main_modes_default_open_remote_and_fixed(self):
+        cid = "51019dc7-497c-46f1-a9b0-3326b303304a"
+        pid = "9c8f0368-9c1b-41b4-8e87-ae309004fe68"
         with (
-            mock.patch.object(self.es, "list_agy_pids", side_effect=[{100}, {100, 200}]),
-            mock.patch.object(self.es, "has_established_https", return_value=True) as mock_443,
-            mock.patch("time.sleep"),
-            mock.patch("webbrowser.open") as mock_open,
+            mock.patch.object(self.es, "is_listening", return_value=True),
+            mock.patch.object(self.es, "get_latest_conversation", return_value=(cid, pid)) as mock_latest,
+            mock.patch.object(self.es, "spawn_detached") as mock_spawn,
         ):
-            self.es.wait_and_open_remote({100}, timeout_sec=5.0)
-            mock_443.assert_called_once_with({200})
-            mock_open.assert_called_once_with(self.es.REMOTE_URL)
+            self.es.main([])
+            mock_latest.assert_not_called()
+            mock_spawn.assert_not_called()
+
+            self.es.main(["--open-remote"])
+            mock_latest.assert_called_once()
+            self.assertIn("--_cid", mock_spawn.call_args.args[0])
+            self.assertIn(cid, mock_spawn.call_args.args[0])
+
+            mock_latest.reset_mock()
+            mock_spawn.reset_mock()
+            self.es.main(["--open-remote", "fixed"])
+            mock_latest.assert_not_called()
+            self.assertNotIn("--_cid", mock_spawn.call_args.args[0])
 
 
 if __name__ == "__main__":

@@ -20,13 +20,23 @@ agy plugin install https://github.com/Artin0123/harness-setup/tree/master/agy/ag
 - **安裝油猴腳本**：開啟 [GitHub Raw 油猴腳本](https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/agy-metrics/agy-metrics-overlay.user.js) 直接安裝到 Tampermonkey（內建 `@updateURL` / `@downloadURL`，後續可一鍵檢查更新），之後開啟 Remote Control 頁面即可自動連線顯示。
 - **區網／手機連線**：啟動指令加上 `--lan` 改綁 `0.0.0.0:47891`（`POST /api/shutdown` 僅限本機 loopback 呼叫以確保安全）。
 
-### 選配：VS Code 快捷鍵一鍵啟動（自動接續最新對話 + 就緒後開網頁 + `--lan`）
+### 選配：VS Code 快捷鍵一鍵啟動（自動接續最新對話 + 就緒後直達網頁 + `--lan`）
+
+先透過一行指令同步 `resume_latest.py` 到 `~\.gemini\config\scripts\resume_latest.py`（純 CLI 亦可單獨執行用於 `/compact` 等操作）：
+
+```powershell
+irm https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/sync-setup.ps1 | iex
+```
+
+再於 VS Code `keybindings.json` 加入：
 
 ```json
 "args": {
-  "text": "$id=python \"$env:USERPROFILE\\.gemini\\config\\plugins\\agy-metrics\\hooks\\ensure_server.py\" --lan --open-remote --latest-id; if($id){agy -r $id --remote-control}else{agy -c --remote-control}\r"
+  "text": "python \"$env:USERPROFILE\\.gemini\\config\\plugins\\agy-metrics\\hooks\\ensure_server.py\" --lan --open-remote; python \"$env:USERPROFILE\\.gemini\\config\\scripts\\resume_latest.py\" --remote-control\r"
 }
 ```
+
+（若網頁端只需開啟固定入口，可改傳 `--open-remote fixed`。）
 
 ### 手動優雅關閉背景服務
 

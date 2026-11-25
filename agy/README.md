@@ -32,8 +32,8 @@
   - **系統提示詞精簡 99%**：原生預設代理的 `systemInstruction` 高達 **19,254 字元**（含 `<identity>`、`<artifacts>`、`<skills>`、`<slash_commands>`、`<user_rules>` 等）；而在啟用 `excludeDefaultComponents: true` 的 `clean-template` 下，提示詞縮水至僅 **125 字元**（僅保留自訂的 System Prompt 正文）。
   - **工具宣告（`functionDeclarations`）精確控制**：預設代理會掛載 13 支工具；在 `clean-template` 下會關閉子代理、排程、搜尋等預設組件建構器，僅掛載核心基礎的 6 支工具（`read_file`、`write_file`、`edit_file`、`run_command`、`manage_task`、`ask_question`）。若自訂 `tools:` 進一步精簡，更可縮減至指定的極少數工具。
 
-### 5. `agy/sync-agent.ps1`（客製代理初始化與 Skills／對話規則同步）
-- **主要用途**：建立或更新 `~\.gemini\config\agents\<agent>.md`（預設為 `build`），在使用 `excludeDefaultComponents: true` 保持乾淨提示詞的同時，自動補回 `~\.agents\skills` 清單與跨對話紀錄讀取規則；並將 `~\.agents\skills` 冪等鏡像到全域原生掃描路徑 `~\.gemini\config\skills`。
+### 5. `agy/sync-setup.ps1`（客製代理初始化、Skills／對話規則與輔助腳本同步）
+- **主要用途**：建立或更新 `~\.gemini\config\agents\<agent>.md`（預設為 `build`），在使用 `excludeDefaultComponents: true` 保持乾淨提示詞的同時，自動補回 `~\.agents\skills` 清單與跨對話紀錄讀取規則；並同步 `agy/resume_latest.py` 至 `~\.gemini\config\scripts\resume_latest.py`。
 - **解決的痛點**：
   - **自動建立範本**：若目標 `.md` 不存在，會自動建立含 `excludeDefaultComponents: true` 與已驗證可用 `tools:` 清單（含 `generate_image` 等 13 支可用工具，排除無效的 `swarm` 與強制附掛的 `manage_task`）的設定檔，並在檔頭附上遠端生成指令。
   - **冪等同步**：若檔案已存在，會完整保留既有 YAML 與自訂正文，僅更新 `<conversation_transcript>` 與 `<skills>` 區塊，不產生多餘註解標記。
@@ -61,10 +61,11 @@
   agy plugin install https://github.com/Artin0123/harness-setup/tree/master/agy/agy-metrics
   ```
 - **安裝油猴腳本**：啟動 `agy` 後會自動拉起背景後端服務，開啟 [GitHub Raw 油猴腳本](https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/agy-metrics/agy-metrics-overlay.user.js) 安裝到 Tampermonkey 即可在 Remote Control 頁面內嵌顯示並自動檢查更新；若需手動優雅關閉，可執行 `irm -Method Post http://127.0.0.1:47891/api/shutdown`。
-- **VS Code 快捷鍵自動啟動範例（自動接續最新對話 + 就緒後開網頁 + `--lan`）**：
+- **VS Code 快捷鍵自動啟動範例（自動接續最新對話 + 就緒後直達網頁 + `--lan`）**：
+  先執行 `irm https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/sync-setup.ps1 | iex` 同步 [`agy/resume_latest.py`](./resume_latest.py)（純 CLI 也可單獨執行 `python "$env:USERPROFILE\.gemini\config\scripts\resume_latest.py"` 直接進最新對話打 `/compact`）：
   ```json
   "args": {
-    "text": "$id=python \"$env:USERPROFILE\\.gemini\\config\\plugins\\agy-metrics\\hooks\\ensure_server.py\" --lan --open-remote --latest-id; if($id){agy -r $id --remote-control}else{agy -c --remote-control}\r"
+    "text": "python \"$env:USERPROFILE\\.gemini\\config\\plugins\\agy-metrics\\hooks\\ensure_server.py\" --lan --open-remote; python \"$env:USERPROFILE\\.gemini\\config\\scripts\\resume_latest.py\" --remote-control\r"
   }
   ```
 
