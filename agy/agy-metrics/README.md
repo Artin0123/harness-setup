@@ -1,15 +1,13 @@
 # agy-metrics
 
-零外部依賴（僅使用 Python 3 標準函式庫）的 Antigravity CLI (`agy`) 與 Remote Control 本地遙測儀表板插件。
+零外部依賴（僅使用 Python 3 標準函式庫）的 Antigravity CLI (`agy`) 與 Remote Control 本地遙測後端 + 油猴內嵌監控插件。
 
 ## 功能特色
 
-- **自動啟停**：透過 `SessionStart` Hook 在啟動 `agy` 時靜默拉起背景網頁服務（`http://127.0.0.1:47891`）；當所有 `agy.exe` 行程結束後約 1 秒自動優雅關閉。
-- **即時推送（SSE）**：監聽本地 `conversations/*.db` 與 `conversation_summaries.db` 異動，無需輪詢即可即時刷新。
-- **對話清單與搜尋**：自動過濾已刪除對話，支援依標題、ID 前綴與專案標籤（具名專案資料夾名稱、`CLI Project`）即時搜尋與篩選。
-- **四核心指標卡片（鍵值兩端對齊）**：上下文（已用／上限與當前調用模型）、總輸入（快取／未快取／命中率）、總輸出（思考／回覆）、上次請求與總請求次數。
-- **依使用者輪次彙總表格**：將單輪內多次工具呼叫請求合併統計，顯示 `TTFT / 總耗時`、純串流速度（`tok/s`）、`輸入 (快取 + 未快取)`、`輸出 (思考 + 回覆)` 與 `執行時間`（`MM/DD HH:mm`）。
-- **PWA 與響應式排版**：支援安裝為獨立桌面／手機 PWA 視窗，窄螢幕自動切換為漢堡側邊欄與水平可捲動表格。
+- **自動啟停**：透過 `SessionStart` Hook 在啟動 `agy` 時靜默拉起背景後端服務（`http://127.0.0.1:47891`）；當所有 `agy.exe` 行程結束後約 1 秒自動優雅關閉。
+- **Remote Control 內嵌上下文監控（油猴腳本）**：內建 `agy-metrics-overlay.user.js`（手動複製貼入 Tampermonkey 即可安裝／更新），直接嵌在 `antigravity.google.com` 對話框模型選擇器右側，以空心圓環呈現上下文比例；點擊展開完整統計（上次請求、快取命中率、已用上下文、上下文上限）與單一可滾動輪次明細表（附固定底端加總列與 `X 輪對話`）。
+- **5 小時模型額度扣減追蹤**：直接讀取本機 OAuth 憑證呼叫 `v1internal` 官方配額介面（支援純 Remote Control），依對話模型自動對應 `gemini-5h` 或 `3p-5h`，以事件驅動紀錄 7 位小數精度的每輪額度扣減與本對話累計消耗；遇到 Token 過期（HTTP 401）時會自動於背景執行 `agy models` 透過 `refresh_token` 無感換發新 Token 並重試。
+- **跨裝置區網／手機支援**：油猴腳本自動偵測 `127.0.0.1`，若未連線（例如手機瀏覽器）會自動顯示主機 IP 輸入框並儲存於油猴空間；對話框底部工具列支援橫向滑動，面板高度自動貼合標題欄不遮擋。
 
 ## 安裝與使用
 
@@ -18,19 +16,26 @@
 agy plugin install https://github.com/Artin0123/harness-setup/tree/master/agy/agy-metrics
 ```
 
-啟動 `agy` 後，直接於瀏覽器開啟 **`http://127.0.0.1:47891`** 即可查看；若需讓同區網裝置連線，可於啟動指令加上 `--lan` 改綁 `0.0.0.0:47891`。
+啟動 `agy` 後：
+- **安裝油猴腳本**：將 `agy-metrics-overlay.user.js` 內容複製貼入 Tampermonkey 新增／更新腳本，之後開啟 Remote Control 頁面即可自動連線顯示。
+- **區網／手機連線**：啟動指令加上 `--lan` 改綁 `0.0.0.0:47891`（`POST /api/shutdown` 僅限本機 loopback 呼叫以確保安全）。
 
-### 選配：VS Code 快捷鍵一鍵啟動並開啟儀表板
+### 選配：VS Code 快捷鍵一鍵啟動（含 `--lan` 區網支援）
 
 ```json
 "args": {
-  "text": "python \"$env:USERPROFILE\\.gemini\\config\\plugins\\agy-metrics\\hooks\\ensure_server.py\"; Start-Process http://127.0.0.1:47891; agy -c --remote-control\r"
+  "text": "python \"$env:USERPROFILE\\.gemini\\config\\plugins\\agy-metrics\\hooks\\ensure_server.py\" --lan; agy -c --remote-control\r"
 }
 ```
 
 ### 手動優雅關閉背景服務
 
-- 於終端機執行：
-  ```powershell
-  irm -Method Post http://127.0.0.1:47891/api/shutdown
-  ```
+```powershell
+irm -Method Post http://127.0.0.1:47891/api/shutdown
+```
+
+### 執行單元測試
+
+```powershell
+python -m unittest discover -s .\agy\agy-metrics -p "test_*.py" -v
+```

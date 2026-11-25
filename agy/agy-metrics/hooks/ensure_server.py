@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ensure agy-metrics web server is running in background on 127.0.0.1:47891."""
+"""Ensure agy-metrics backend server is running in background on 127.0.0.1:47891."""
 
 import argparse
 import os
@@ -32,7 +32,7 @@ def stop_server(port: int) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--stop", action="store_true", help="Gracefully stop the background server")
-    parser.add_argument("--url", action="store_true", help="Print the dashboard URL to stdout")
+    parser.add_argument("--url", action="store_true", help="Print the backend URL to stdout")
     parser.add_argument("--lan", action="store_true", help="Bind to 0.0.0.0 for LAN access")
     args = parser.parse_args()
 
@@ -76,7 +76,7 @@ def main() -> None:
                 time.sleep(0.05)
 
     if args.url:
-        print(f"http://localhost:{PORT}")
+        print(f"http://127.0.0.1:{PORT}")
 
 
 if __name__ == "__main__":

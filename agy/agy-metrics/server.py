@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
-"""Sidecar & standalone web UI for Antigravity CLI / Remote Control telemetry."""
+"""Local telemetry & Quota Tracker backend for the agy-metrics userscript."""
 
 import argparse
+import ctypes
+import ctypes.wintypes as wt
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import threading
 import time
-from datetime import datetime
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, urlparse
 
 
 def resolve_data_dir() -> Path:
@@ -26,24 +31,14 @@ def resolve_data_dir() -> Path:
 
 
 BASE_DIR = resolve_data_dir()
-INDEX_HTML = Path(__file__).with_name("index.html")
-PWA_ICON = (
-    "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E"
-    "%3Crect width='32' height='32' rx='8' fill='%23171a23'/%3E"
-    "%3Cpath d='M5 18h5l3-8 5 12 3-6h6' fill='none' stroke='%236aa9ff' stroke-width='2.6' "
-    "stroke-linecap='round' stroke-linejoin='round'/%3E"
-    "%3Ccircle cx='25' cy='16' r='2.2' fill='%233ddc97'/%3E%3C/svg%3E"
-)
-PWA_MANIFEST = json.dumps({
-    "name": "agy-metrics",
-    "short_name": "agy-metrics",
-    "start_url": "/",
-    "display": "standalone",
-    "background_color": "#0f1117",
-    "theme_color": "#0f1117",
-    "icons": [{"src": PWA_ICON, "sizes": "any", "type": "image/svg+xml"}],
-}, ensure_ascii=False).encode("utf-8")
+QUOTA_DB_PATH = BASE_DIR / "agy_metrics_quota.db"
+CLOUDCODE_BASE = "https://daily-cloudcode-pa.googleapis.com"
+USER_AGENT = "antigravity/1.5.16"
 
+
+# ---------------------------------------------------------------------------
+# Protobuf wire decoder (zero external deps)
+# ---------------------------------------------------------------------------
 
 def read_varint(buf: bytes, i: int) -> tuple[int, int]:
     val = 0
@@ -67,23 +62,23 @@ def parse_pb(buf: bytes) -> dict[int, list]:
         except ValueError:
             break
         fn = tag >> 3
-        wt = tag & 7
+        wt_num = tag & 7
         if fn == 0:
             break
         fields.setdefault(fn, [])
-        if wt == 0:
+        if wt_num == 0:
             v, i = read_varint(buf, i)
             fields[fn].append(v)
-        elif wt == 2:
+        elif wt_num == 2:
             l, i = read_varint(buf, i)
             if i + l > len(buf):
                 break
             fields[fn].append(buf[i : i + l])
             i += l
-        elif wt == 5:
+        elif wt_num == 5:
             fields[fn].append(buf[i : i + 4])
             i += 4
-        elif wt == 1:
+        elif wt_num == 1:
             fields[fn].append(buf[i : i + 8])
             i += 8
         else:
@@ -162,24 +157,6 @@ def parse_gen_row(idx: int, data: bytes) -> dict | None:
     }
 
 
-def classify_group(project_id: str, workspace_uris: str) -> tuple[str, str, str]:
-    """Return (filter_category, badge_label, badge_kind)."""
-    ws_name = ""
-    if workspace_uris:
-        try:
-            uris = json.loads(workspace_uris)
-            if isinstance(uris, list) and uris:
-                raw_path = unquote(str(uris[0]))
-                ws_name = Path(raw_path.replace("file:///", "")).name
-        except Exception:
-            pass
-    if project_id == "default-cli-project":
-        return ("專案", "CLI Project", "cli")
-    if project_id and project_id != "outside-of-project":
-        return ("專案", ws_name or project_id[:8], "proj")
-    return ("一般", "", "gen")
-
-
 def parse_step_time(meta_blob: bytes | None) -> str:
     if not meta_blob:
         return "—"
@@ -203,6 +180,8 @@ def group_by_turns(requests: list[dict], user_steps: list[tuple[int, str]]) -> l
             {
                 "turnNo": 1,
                 "requestCount": len(requests),
+                "startReq": 1,
+                "endReq": len(requests),
                 "ttftSum": ttft_sum,
                 "durSum": ttft_sum + stream_sum,
                 "cachedIn": cached_in,
@@ -231,10 +210,13 @@ def group_by_turns(requests: list[dict], user_steps: list[tuple[int, str]]) -> l
         buckets[turn_idx].append(r)
 
     turns = []
+    cum_reqs = 0
     for i in range(len(user_steps)):
         reqs = buckets[i]
         if not reqs:
             continue
+        start_req = cum_reqs + 1
+        cum_reqs += len(reqs)
         ttft_sum = sum(r["ttft"] or 0 for r in reqs)
         stream_sum = sum(r["streaming"] or 0 for r in reqs)
         cached_in = sum(r["cachedIn"] for r in reqs)
@@ -243,6 +225,8 @@ def group_by_turns(requests: list[dict], user_steps: list[tuple[int, str]]) -> l
         turns.append({
             "turnNo": i + 1,
             "requestCount": len(reqs),
+            "startReq": start_req,
+            "endReq": cum_reqs,
             "ttftSum": ttft_sum,
             "durSum": ttft_sum + stream_sum,
             "cachedIn": cached_in,
@@ -257,12 +241,32 @@ def group_by_turns(requests: list[dict], user_steps: list[tuple[int, str]]) -> l
     return turns[::-1]
 
 
+_CONV_CACHE_LOCK = threading.Lock()
+_CONV_CACHE: dict[str, tuple[int, int, dict]] = {}
+
+
+def is_valid_cid(cid: str) -> bool:
+    return bool(cid) and all(c.isalnum() or c in "-_" for c in cid)
+
+
 def inspect_conversation(cid: str) -> dict | None:
-    if not cid or not all(c.isalnum() or c in "-_" for c in cid):
+    if not is_valid_cid(cid):
         return None
     db_path = BASE_DIR / "conversations" / f"{cid}.db"
     if not db_path.is_file():
         return None
+    try:
+        db_mtime = db_path.stat().st_mtime_ns
+        wal_path = db_path.with_name(db_path.name + "-wal")
+        wal_mtime = wal_path.stat().st_mtime_ns if wal_path.is_file() else 0
+    except OSError:
+        return None
+
+    with _CONV_CACHE_LOCK:
+        cached = _CONV_CACHE.get(cid)
+        if cached and cached[0] == db_mtime and cached[1] == wal_mtime:
+            return cached[2]
+
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1.0)
     try:
         rows = conn.execute("SELECT idx, data FROM gen_metadata ORDER BY idx ASC").fetchall()
@@ -280,18 +284,24 @@ def inspect_conversation(cid: str) -> dict | None:
             requests.append(item)
 
     if not requests:
-        return {
+        result = {
             "id": cid,
             "latest": None,
             "totals": None,
             "turns": [],
-            "mtimeMs": int(db_path.stat().st_mtime * 1000),
+            "mtimeMs": int(db_mtime / 1_000_000),
         }
+        with _CONV_CACHE_LOCK:
+            _CONV_CACHE[cid] = (db_mtime, wal_mtime, result)
+        return result
 
     latest = requests[-1]
     turns = group_by_turns(requests, user_steps)
     total_cached = sum(r["cachedIn"] for r in requests)
     total_uncached = sum(r["uncachedIn"] for r in requests)
+    total_ttft = sum(r["ttft"] or 0.0 for r in requests)
+    total_stream = sum(r["streaming"] or 0.0 for r in requests)
+    total_out = sum(r["totalOut"] for r in requests)
     totals = {
         "requests": len(requests),
         "totalIn": total_cached + total_uncached,
@@ -299,55 +309,46 @@ def inspect_conversation(cid: str) -> dict | None:
         "uncachedIn": total_uncached,
         "think": sum(r["think"] for r in requests),
         "reply": sum(r["reply"] for r in requests),
-        "totalOut": sum(r["totalOut"] for r in requests),
+        "totalOut": total_out,
+        "ttftSum": total_ttft,
+        "durSum": total_ttft + total_stream,
+        "tps": (total_out / total_stream) if (total_out > 0 and total_stream > 0) else None,
     }
-    return {
+    result = {
         "id": cid,
         "latest": latest,
         "totals": totals,
         "turns": turns,
-        "mtimeMs": int(db_path.stat().st_mtime * 1000),
+        "mtimeMs": int(db_mtime / 1_000_000),
     }
+    with _CONV_CACHE_LOCK:
+        if len(_CONV_CACHE) > 128:
+            _CONV_CACHE.clear()
+        _CONV_CACHE[cid] = (db_mtime, wal_mtime, result)
+    return result
 
 
-def list_conversations(query: str = "", group_filter: str = "all") -> list[dict]:
+def list_conversations() -> list[dict]:
     sum_db = BASE_DIR / "conversation_summaries.db"
     if not sum_db.is_file():
         return []
     conn = sqlite3.connect(f"file:{sum_db}?mode=ro", uri=True, timeout=1.0)
     try:
         rows = conn.execute(
-            "SELECT conversation_id, title, last_modified_time, step_count, project_id, workspace_uris "
+            "SELECT conversation_id, title, last_modified_time, step_count "
             "FROM conversation_summaries ORDER BY last_modified_time DESC"
         ).fetchall()
     finally:
         conn.close()
 
-    q = query.strip().lower()
     out = []
-    for cid, title, mtime_str, steps, proj_id, ws_uris in rows:
+    for cid, title, mtime_str, steps in rows:
         db_path = BASE_DIR / "conversations" / f"{cid}.db"
         if not db_path.is_file():
             continue
-
-        grp, badge_label, badge_kind = classify_group(proj_id or "", ws_uris or "")
-        if group_filter == "project" and grp != "專案":
-            continue
-        if group_filter == "general" and grp != "一般":
-            continue
-
-        clean_title = (title or "(無標題)").strip()
-        if q:
-            hay = f"{cid} {clean_title} {badge_label}".lower()
-            if q not in hay:
-                continue
-
         out.append({
             "id": cid,
-            "title": clean_title,
-            "group": grp,
-            "badgeLabel": badge_label,
-            "badgeKind": badge_kind,
+            "title": (title or "(無標題)").strip(),
             "lastModified": mtime_str,
             "steps": steps,
         })
@@ -358,6 +359,7 @@ def snapshot_signature() -> tuple:
     conv_dir = BASE_DIR / "conversations"
     newest = 0
     count = 0
+    newest_cid = ""
     if conv_dir.is_dir():
         for p in conv_dir.iterdir():
             if p.suffix in (".db", ".db-wal"):
@@ -366,6 +368,7 @@ def snapshot_signature() -> tuple:
                     ns = p.stat().st_mtime_ns
                     if ns > newest:
                         newest = ns
+                        newest_cid = p.name.split(".")[0]
                 except OSError:
                     pass
     sum_db = BASE_DIR / "conversation_summaries.db"
@@ -375,8 +378,764 @@ def snapshot_signature() -> tuple:
             sum_ns = sum_db.stat().st_mtime_ns
         except OSError:
             pass
-    return (count, newest, sum_ns)
+    return (count, newest, sum_ns, newest_cid)
 
+
+# ---------------------------------------------------------------------------
+# Direct OAuth Token Reader & v1internal Quota Tracker (Scheme D)
+# ---------------------------------------------------------------------------
+
+def _parse_iso_ts(val: str | None) -> float:
+    if not val:
+        return 0.0
+    try:
+        s = val.strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        # Trim sub-microsecond nanoseconds if present (e.g. .8819952+08:00)
+        if "." in s:
+            head, tail = s.split(".", 1)
+            tz_pos = max(tail.find("+"), tail.find("-"))
+            if tz_pos != -1:
+                frac, tz = tail[:tz_pos][:6], tail[tz_pos:]
+                s = f"{head}.{frac}{tz}"
+            else:
+                s = f"{head}.{tail[:6]}"
+        return datetime.fromisoformat(s).timestamp()
+    except Exception:
+        return 0.0
+
+
+def _read_windows_credential(target: str) -> str | None:
+    if os.name != "nt":
+        return None
+    try:
+        class CREDENTIAL(ctypes.Structure):
+            _fields_ = [
+                ("Flags", wt.DWORD), ("Type", wt.DWORD), ("TargetName", wt.LPWSTR),
+                ("Comment", wt.LPWSTR), ("LastWritten", wt.FILETIME),
+                ("CredentialBlobSize", wt.DWORD), ("CredentialBlob", ctypes.POINTER(ctypes.c_byte)),
+                ("Persist", wt.DWORD), ("AttributeCount", wt.DWORD), ("Attributes", ctypes.c_void_p),
+                ("TargetAlias", wt.LPWSTR), ("UserName", wt.LPWSTR),
+            ]
+
+        advapi32 = ctypes.windll.advapi32
+        advapi32.CredReadW.argtypes = [wt.LPWSTR, wt.DWORD, wt.DWORD, ctypes.POINTER(ctypes.POINTER(CREDENTIAL))]
+        advapi32.CredReadW.restype = wt.BOOL
+        advapi32.CredFree.argtypes = [ctypes.c_void_p]
+
+        pcred = ctypes.POINTER(CREDENTIAL)()
+        if not advapi32.CredReadW(target, 1, 0, ctypes.byref(pcred)):
+            return None
+        try:
+            raw = ctypes.string_at(pcred.contents.CredentialBlob, pcred.contents.CredentialBlobSize)
+            return raw.decode("utf-8", errors="ignore")
+        finally:
+            advapi32.CredFree(pcred)
+    except Exception:
+        return None
+
+
+def read_oauth_token() -> tuple[str | None, str | None, str | None]:
+    """Return (access_token, expiry_iso, email) from Windows Credential Manager or token file."""
+    candidates: list[tuple[float, str, str | None, str | None]] = []
+
+    token_file = BASE_DIR / "antigravity-oauth-token"
+    if token_file.is_file():
+        try:
+            parsed = json.loads(token_file.read_text(encoding="utf-8", errors="ignore"))
+            tok = (parsed.get("token") or {}).get("access_token")
+            if tok:
+                exp_s = (parsed.get("token") or {}).get("expiry")
+                candidates.append((_parse_iso_ts(exp_s), tok, exp_s, parsed.get("id_token_email")))
+        except Exception:
+            pass
+
+    raw_cred = _read_windows_credential("gemini:antigravity")
+    if raw_cred:
+        try:
+            parsed = json.loads(raw_cred)
+            tok = (parsed.get("token") or {}).get("access_token")
+            if tok:
+                exp_s = (parsed.get("token") or {}).get("expiry")
+                candidates.append((_parse_iso_ts(exp_s), tok, exp_s, parsed.get("id_token_email")))
+        except Exception:
+            pass
+
+    if not candidates:
+        return (None, None, None)
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    _, tok, exp_s, email = candidates[0]
+    return (tok, exp_s, email)
+
+
+def find_agy_executable() -> str | None:
+    if os.name == "nt":
+        candidates = [
+            Path(os.environ.get("LOCALAPPDATA", "")) / "agy" / "bin" / "agy.exe",
+            Path.home() / ".gemini" / "bin" / "agy.exe",
+        ]
+        for p in candidates:
+            if p.is_file():
+                return str(p)
+    else:
+        p = Path.home() / ".gemini" / "bin" / "agy"
+        if p.is_file():
+            return str(p)
+    return shutil.which("agy")
+
+
+def trigger_agy_token_refresh(timeout: float = 20.0) -> bool:
+    """Invoke `agy models` hidden to refresh the OAuth access_token via refresh_token."""
+    exe = find_agy_executable()
+    if not exe:
+        return False
+    kwargs: dict = {
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "timeout": timeout,
+    }
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    try:
+        res = subprocess.run([exe, "models"], **kwargs)
+        return res.returncode == 0
+    except Exception:
+        return False
+
+
+def model_to_bucket(model_name: str) -> str:
+    low = (model_name or "").lower()
+    if any(k in low for k in ("claude", "gpt", "opus", "sonnet")):
+        return "3p-5h"
+    return "gemini-5h"
+
+
+class QuotaTracker:
+    """Event-driven direct v1internal quota fetcher & token-to-quota delta correlator."""
+
+    def __init__(self, db_path: Path):
+        self.db_path = db_path
+        self._lock = threading.Lock()
+        self._cli_refresh_lock = threading.Lock()
+        self._last_cli_refresh_ts: float = 0.0
+        self._project_id: str | None = None
+        self._tier_id: str | None = None
+        self._last_fetch_ts: float = 0.0
+        self._buckets: dict[str, dict] = {}
+        self._account: str | None = None
+        self._token_expiry: str | None = None
+        self._last_token: str | None = None
+        self._error: str | None = None
+        self._version: int = 0
+
+        # Watermarks for correlating DB token deltas to quota drops:
+        # conv_id -> { requests, uncachedIn, cachedIn, think, reply, totalOut, model }
+        self._conv_watermarks: dict[str, dict] = {}
+        # bucket_key -> { fraction, resetTime, acc_reqs, acc_uncached, acc_cached, acc_think, acc_reply, acc_out, last_cid, last_model }
+        self._bucket_acc: dict[str, dict] = {}
+
+        self._init_db()
+
+    def _init_db(self) -> None:
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(self.db_path, timeout=5.0)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS quota_deltas (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts REAL NOT NULL,
+                    conversation_id TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    bucket_key TEXT NOT NULL,
+                    req_count INTEGER NOT NULL,
+                    delta_reqs INTEGER NOT NULL,
+                    delta_uncached_in INTEGER NOT NULL,
+                    delta_cached_in INTEGER NOT NULL,
+                    delta_think INTEGER NOT NULL,
+                    delta_reply INTEGER NOT NULL,
+                    delta_total_out INTEGER NOT NULL,
+                    quota_before REAL NOT NULL,
+                    quota_after REAL NOT NULL,
+                    delta_fraction REAL NOT NULL,
+                    reset_time TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_qd_bucket_ts ON quota_deltas(bucket_key, ts DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_qd_conv_ts ON quota_deltas(conversation_id, ts DESC)")
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _post_v1(self, path: str, token: str, payload: dict) -> dict:
+        req = urllib.request.Request(
+            f"{CLOUDCODE_BASE}{path}",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "User-Agent": USER_AGENT,
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    def record_conversation_activity(self, cid: str) -> bool:
+        """Inspect a conversation's latest totals and accumulate token deltas since last check.
+        Returns True if new requests were observed."""
+        if not cid:
+            return False
+        info = inspect_conversation(cid)
+        if not info or not info.get("totals") or not info.get("latest"):
+            return False
+        t = info["totals"]
+        model = info["latest"].get("model", "")
+        bkey = model_to_bucket(model)
+
+        with self._lock:
+            prev = self._conv_watermarks.get(cid)
+            curr = {
+                "requests": t["requests"],
+                "uncachedIn": t["uncachedIn"],
+                "cachedIn": t["cachedIn"],
+                "think": t["think"],
+                "reply": t["reply"],
+                "totalOut": t["totalOut"],
+                "model": model,
+            }
+            self._conv_watermarks[cid] = curr
+            if prev is None:
+                # First time seeing this conversation since server start: establish baseline
+                return False
+
+            d_reqs = curr["requests"] - prev["requests"]
+            if d_reqs <= 0:
+                return False
+
+            acc = self._bucket_acc.setdefault(bkey, {
+                "fraction": None,
+                "resetTime": "",
+                "acc_reqs": 0,
+                "acc_uncached": 0,
+                "acc_cached": 0,
+                "acc_think": 0,
+                "acc_reply": 0,
+                "acc_out": 0,
+                "last_cid": cid,
+                "last_model": model,
+                "last_req_count": curr["requests"],
+            })
+            acc["acc_reqs"] += d_reqs
+            acc["acc_uncached"] += max(0, curr["uncachedIn"] - prev["uncachedIn"])
+            acc["acc_cached"] += max(0, curr["cachedIn"] - prev["cachedIn"])
+            acc["acc_think"] += max(0, curr["think"] - prev["think"])
+            acc["acc_reply"] += max(0, curr["reply"] - prev["reply"])
+            acc["acc_out"] += max(0, curr["totalOut"] - prev["totalOut"])
+            acc["last_cid"] = cid
+            acc["last_model"] = model
+            acc["last_req_count"] = curr["requests"]
+            return True
+
+    def seed_watermarks(self) -> None:
+        """Establish initial token baselines for recent conversations so the very next turn produces a clean delta."""
+        try:
+            convs = list_conversations()[:10]
+            for c in convs:
+                self.record_conversation_activity(c["id"])
+        except Exception:
+            pass
+
+    def has_new_token_while_errored(self) -> bool:
+        with self._lock:
+            if not self._error:
+                return False
+            prev_tok = self._last_token
+        tok, _, _ = read_oauth_token()
+        return bool(tok and tok != prev_tok)
+
+    def _fetch_buckets(self, token: str) -> dict[str, dict]:
+        buckets: dict[str, dict] = {}
+        # 1. Fetch per-model quotaInfo (7-digit float32 precision for Gemini & 3P models)
+        fam = self._post_v1("/v1internal:fetchAvailableModels", token, {})
+        models_map = fam.get("models") or {}
+
+        gemini_qi = None
+        third_party_qi = None
+        for mid, minfo in models_map.items():
+            qi = minfo.get("quotaInfo")
+            if not qi or "remainingFraction" not in qi:
+                continue
+            low = mid.lower()
+            if low.startswith("gemini-") and gemini_qi is None:
+                gemini_qi = qi
+            elif (low.startswith("claude-") or low.startswith("gpt-")) and third_party_qi is None:
+                third_party_qi = qi
+
+        if gemini_qi is not None:
+            buckets["gemini-5h"] = {
+                "bucketId": "gemini-5h",
+                "groupName": "Gemini models",
+                "displayName": "Gemini 5h",
+                "window": "5h",
+                "remainingFraction": float(gemini_qi["remainingFraction"]),
+                "resetTime": gemini_qi.get("resetTime", ""),
+            }
+        if third_party_qi is not None:
+            buckets["3p-5h"] = {
+                "bucketId": "3p-5h",
+                "groupName": "Claude & GPT models",
+                "displayName": "Claude/GPT 5h",
+                "window": "5h",
+                "remainingFraction": float(third_party_qi["remainingFraction"]),
+                "resetTime": third_party_qi.get("resetTime", ""),
+            }
+
+        # 2. Fetch grouped 5h + weekly quota summary
+        if self._project_id is None:
+            try:
+                lca = self._post_v1("/v1internal:loadCodeAssist", token, {"metadata": {"ideType": "ANTIGRAVITY"}})
+                self._project_id = lca.get("cloudaicompanionProject") or ""
+                self._tier_id = (lca.get("currentTier") or {}).get("id") or ""
+            except Exception:
+                self._project_id = ""
+
+        qs_payload = {"project": self._project_id} if self._project_id else {}
+        try:
+            qs = self._post_v1("/v1internal:retrieveUserQuotaSummary", token, qs_payload)
+            for grp in qs.get("groups") or []:
+                gname = grp.get("displayName", "")
+                for b in grp.get("buckets") or []:
+                    bid = b.get("bucketId") or ""
+                    if not bid or "remainingFraction" not in b:
+                        continue
+                    win = b.get("window") or ""
+                    short_label = f"{'Claude/GPT' if bid.startswith('3p') else gname} {win}".strip()
+                    buckets[bid] = {
+                        "bucketId": bid,
+                        "groupName": gname,
+                        "displayName": short_label or b.get("displayName", bid),
+                        "window": win,
+                        "remainingFraction": float(b["remainingFraction"]),
+                        "resetTime": b.get("resetTime", ""),
+                        "disabled": bool(b.get("disabled", False)),
+                    }
+        except Exception:
+            pass
+        return buckets
+
+    def _try_cli_refresh_token(self, stale_token: str) -> tuple[str | None, str | None, str | None]:
+        """Auto-refresh expired OAuth token via `agy models` (rate-limited to once per 60s)."""
+        with self._cli_refresh_lock:
+            # Check if another thread or agy already refreshed the token
+            tok, exp, email = read_oauth_token()
+            if tok and tok != stale_token:
+                return (tok, exp, email)
+            now = time.time()
+            if now - self._last_cli_refresh_ts < 60.0:
+                return (None, None, None)
+            self._last_cli_refresh_ts = now
+            if not trigger_agy_token_refresh():
+                return (None, None, None)
+            tok, exp, email = read_oauth_token()
+            if tok and tok != stale_token:
+                return (tok, exp, email)
+            return (None, None, None)
+
+    def refresh(self, force: bool = False, min_interval: float = 10.0) -> bool:
+        now = time.time()
+        token, expiry, email = read_oauth_token()
+        with self._lock:
+            token_changed = bool(token and token != self._last_token)
+            cooldown = 4.0 if force else min_interval
+            if not token_changed and (now - self._last_fetch_ts < cooldown):
+                return False
+            self._last_fetch_ts = now
+            self._last_token = token
+
+        if not token:
+            with self._lock:
+                self._error = "找不到 OAuth Token（請先啟動 agy 登入）"
+            return False
+
+        buckets: dict[str, dict] = {}
+        err_msg: str | None = None
+
+        try:
+            buckets = self._fetch_buckets(token)
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                new_tok, new_exp, new_email = self._try_cli_refresh_token(token)
+                if new_tok:
+                    token, expiry, email = new_tok, new_exp, new_email
+                    with self._lock:
+                        self._last_token = token
+                    try:
+                        buckets = self._fetch_buckets(token)
+                    except urllib.error.HTTPError as e2:
+                        err_msg = f"Quota API HTTP {e2.code}"
+                    except Exception as e2:
+                        err_msg = f"Quota API 錯誤: {e2}"
+                else:
+                    err_msg = "Token 已過期（自動刷新失敗，請重新登入 agy）"
+            else:
+                err_msg = f"Quota API HTTP {e.code}"
+        except Exception as e:
+            err_msg = f"Quota API 錯誤: {e}"
+
+        if err_msg:
+            with self._lock:
+                self._account = email
+                self._token_expiry = expiry
+                self._error = err_msg
+            return False
+
+        # Correlate quota drops with accumulated token deltas
+        new_rows: list[tuple] = []
+        ts_now = time.time()
+        with self._lock:
+            self._buckets = buckets
+            self._account = email
+            self._token_expiry = expiry
+            self._error = None
+            self._version += 1
+
+            for bkey, binfo in buckets.items():
+                curr_frac = binfo["remainingFraction"]
+                curr_reset = binfo.get("resetTime", "")
+                acc = self._bucket_acc.get(bkey)
+                if acc is None:
+                    self._bucket_acc[bkey] = {
+                        "fraction": curr_frac,
+                        "resetTime": curr_reset,
+                        "acc_reqs": 0,
+                        "acc_uncached": 0,
+                        "acc_cached": 0,
+                        "acc_think": 0,
+                        "acc_reply": 0,
+                        "acc_out": 0,
+                        "last_cid": "",
+                        "last_model": "",
+                        "last_req_count": 0,
+                    }
+                    continue
+
+                prev_frac = acc["fraction"]
+                prev_reset = acc["resetTime"]
+
+                # Detect quota window reset or upward jump -> reset baseline without recording bogus delta
+                if prev_frac is None or curr_frac > prev_frac + 1e-6 or (prev_reset and curr_reset and prev_reset != curr_reset and curr_frac >= prev_frac):
+                    acc["fraction"] = curr_frac
+                    acc["resetTime"] = curr_reset
+                    acc["acc_reqs"] = 0
+                    acc["acc_uncached"] = 0
+                    acc["acc_cached"] = 0
+                    acc["acc_think"] = 0
+                    acc["acc_reply"] = 0
+                    acc["acc_out"] = 0
+                    continue
+
+                delta_frac = prev_frac - curr_frac
+                if delta_frac > 1e-7 and acc["acc_reqs"] > 0:
+                    new_rows.append((
+                        ts_now,
+                        acc["last_cid"],
+                        acc["last_model"],
+                        bkey,
+                        acc["last_req_count"],
+                        acc["acc_reqs"],
+                        acc["acc_uncached"],
+                        acc["acc_cached"],
+                        acc["acc_think"],
+                        acc["acc_reply"],
+                        acc["acc_out"],
+                        prev_frac,
+                        curr_frac,
+                        delta_frac,
+                        curr_reset,
+                    ))
+                    acc["fraction"] = curr_frac
+                    acc["resetTime"] = curr_reset
+                    acc["acc_reqs"] = 0
+                    acc["acc_uncached"] = 0
+                    acc["acc_cached"] = 0
+                    acc["acc_think"] = 0
+                    acc["acc_reply"] = 0
+                    acc["acc_out"] = 0
+                elif delta_frac > 1e-7:
+                    # Quota dropped from another client/session; update baseline so future deltas stay clean
+                    acc["fraction"] = curr_frac
+                    acc["resetTime"] = curr_reset
+
+        if new_rows:
+            conn = sqlite3.connect(self.db_path, timeout=5.0)
+            try:
+                conn.executemany(
+                    """
+                    INSERT INTO quota_deltas (
+                        ts, conversation_id, model, bucket_key, req_count, delta_reqs,
+                        delta_uncached_in, delta_cached_in, delta_think, delta_reply, delta_total_out,
+                        quota_before, quota_after, delta_fraction, reset_time
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    new_rows,
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        return True
+
+    def _query_stats(self, cid: str | None = None) -> tuple[dict, list[dict], list[dict]]:
+        """Return (per_bucket_stats, recent_deltas, conv_deltas)."""
+        conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True, timeout=2.0)
+        try:
+            rows = conn.execute(
+                """
+                SELECT ts, conversation_id, model, bucket_key, req_count, delta_reqs,
+                       delta_uncached_in, delta_cached_in, delta_think, delta_reply, delta_total_out,
+                       quota_before, quota_after, delta_fraction
+                FROM quota_deltas
+                ORDER BY ts DESC
+                LIMIT 200
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+
+        agg: dict[str, dict] = {}
+        recent = []
+        for r in rows:
+            ts, r_cid, model, bkey, req_cnt, d_reqs, d_unc, d_cac, d_thk, d_rep, d_out, qb, qa, df = r
+            item = {
+                "ts": ts,
+                "time": datetime.fromtimestamp(ts).strftime("%m/%d %H:%M"),
+                "conversationId": r_cid,
+                "model": model,
+                "bucketKey": bkey,
+                "reqCount": req_cnt,
+                "deltaReqs": d_reqs,
+                "deltaUncachedIn": d_unc,
+                "deltaCachedIn": d_cac,
+                "deltaTotalIn": d_unc + d_cac,
+                "deltaThink": d_thk,
+                "deltaReply": d_rep,
+                "deltaTotalOut": d_out,
+                "quotaBeforePct": round(qb * 100.0, 4),
+                "quotaAfterPct": round(qa * 100.0, 4),
+                "deltaPct": round(df * 100.0, 4),
+            }
+            if len(recent) < 20:
+                recent.append(item)
+            a = agg.setdefault(bkey, {
+                "samples": 0, "df": 0.0, "unc": 0, "cac": 0, "thk": 0, "rep": 0, "out": 0, "latest": item
+            })
+            a["samples"] += 1
+            a["df"] += df
+            a["unc"] += d_unc
+            a["cac"] += d_cac
+            a["thk"] += d_thk
+            a["rep"] += d_rep
+            a["out"] += d_out
+
+        stats: dict[str, dict] = {}
+        for bkey, a in agg.items():
+            pct = a["df"] * 100.0
+            if pct <= 0:
+                continue
+            stats[bkey] = {
+                "samples": a["samples"],
+                "totalDeltaPct": round(pct, 4),
+                "per1Pct": {
+                    "uncachedIn": round(a["unc"] / pct),
+                    "cachedIn": round(a["cac"] / pct),
+                    "totalIn": round((a["unc"] + a["cac"]) / pct),
+                    "think": round(a["thk"] / pct),
+                    "reply": round(a["rep"] / pct),
+                    "totalOut": round(a["out"] / pct),
+                },
+                "latestDelta": a["latest"],
+            }
+
+        conv_deltas = self._query_conv_deltas(cid)
+        return stats, recent, conv_deltas
+
+    def _query_conv_deltas(self, cid: str | None) -> list[dict]:
+        if not cid:
+            return []
+        conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True, timeout=2.0)
+        try:
+            conv_rows = conn.execute(
+                """
+                SELECT ts, model, bucket_key, req_count, delta_reqs,
+                       delta_uncached_in, delta_cached_in, delta_total_out,
+                       quota_before, quota_after, delta_fraction
+                FROM quota_deltas
+                WHERE conversation_id = ?
+                ORDER BY ts DESC
+                """,
+                (cid,),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [
+            {
+                "ts": r[0],
+                "time": datetime.fromtimestamp(r[0]).strftime("%m/%d %H:%M"),
+                "model": r[1],
+                "bucketKey": r[2],
+                "reqCount": r[3],
+                "deltaReqs": r[4],
+                "deltaUncachedIn": r[5],
+                "deltaCachedIn": r[6],
+                "deltaTotalOut": r[7],
+                "quotaBeforePct": round(r[8] * 100.0, 4),
+                "quotaAfterPct": round(r[9] * 100.0, 4),
+                "deltaPct": round(r[10] * 100.0, 4),
+            }
+            for r in conv_rows
+        ]
+
+    def _filter_5h_deltas(self, conv_deltas: list[dict], active_bucket: str | None) -> tuple[list[dict], float | None]:
+        if active_bucket:
+            deltas_5h = [d for d in conv_deltas if d.get("bucketKey") == active_bucket]
+        else:
+            deltas_5h = [d for d in conv_deltas if str(d.get("bucketKey", "")).endswith("-5h")]
+        total_pct = round(sum(d["deltaPct"] for d in deltas_5h), 4) if deltas_5h else None
+        return deltas_5h, total_pct
+
+    def get_state(self, cid: str | None = None, active_bucket: str | None = None, compact: bool = False) -> dict:
+        with self._lock:
+            meta = {
+                "lastUpdatedMs": int(self._last_fetch_ts * 1000) if self._last_fetch_ts else 0,
+                "error": self._error,
+                "version": self._version,
+            }
+            buckets_out = {}
+            if not compact:
+                now_utc = datetime.now(timezone.utc).timestamp()
+                for k, b in self._buckets.items():
+                    rt = b.get("resetTime", "")
+                    reset_in = max(0, int(_parse_iso_ts(rt) - now_utc)) if rt else None
+                    buckets_out[k] = {
+                        **b,
+                        "remainingPct": round(b["remainingFraction"] * 100.0, 4),
+                        "resetInSeconds": reset_in,
+                    }
+
+        if compact:
+            conv_deltas = self._query_conv_deltas(cid)
+            deltas_5h, conv_total_delta_pct = self._filter_5h_deltas(conv_deltas, active_bucket)
+            return {
+                **meta,
+                "convDeltas": deltas_5h,
+                "convTotalDeltaPct": conv_total_delta_pct,
+            }
+
+        stats, recent, conv_deltas = self._query_stats(cid=cid)
+        deltas_5h, conv_total_delta_pct = self._filter_5h_deltas(conv_deltas, active_bucket)
+        return {
+            **meta,
+            "buckets": buckets_out,
+            "stats": stats,
+            "recentDeltas": recent,
+            "convDeltas": deltas_5h,
+            "convTotalDeltaPct": conv_total_delta_pct,
+        }
+
+    def version(self) -> int:
+        with self._lock:
+            return self._version
+
+
+QUOTA_TRACKER = QuotaTracker(QUOTA_DB_PATH)
+
+
+def start_quota_watcher() -> None:
+    """Background event-driven watcher: refreshes quota when conversations/*.db or OAuth token changes."""
+    def _loop():
+        QUOTA_TRACKER.seed_watermarks()
+        QUOTA_TRACKER.refresh(force=True)
+        last_sig = snapshot_signature()
+        pending_refresh_at: float = 0.0
+        tick = 0
+        while True:
+            time.sleep(0.8)
+            tick += 1
+            sig = snapshot_signature()
+            if sig[:3] != last_sig[:3]:
+                last_sig = sig
+                cid = sig[3]
+                if cid and QUOTA_TRACKER.record_conversation_activity(cid):
+                    # Debounce 1.5s to coalesce rapid tool-call bursts
+                    pending_refresh_at = time.time() + 1.5
+            if pending_refresh_at and time.time() >= pending_refresh_at:
+                pending_refresh_at = 0.0
+                QUOTA_TRACKER.refresh(force=False, min_interval=10.0)
+            elif tick % 3 == 0 and QUOTA_TRACKER.has_new_token_while_errored():
+                QUOTA_TRACKER.refresh(force=True)
+
+    threading.Thread(target=_loop, daemon=True).start()
+
+
+def attach_turn_quotas(metrics: dict | None, conv_deltas: list[dict]) -> dict | None:
+    """Return a shallow copy of metrics with per-conversation 5h quota deltas merged into each turn."""
+    if not metrics or not metrics.get("turns") or not conv_deltas:
+        return metrics
+    turns_out = []
+    for turn in metrics["turns"]:
+        s_req = turn.get("startReq", 0)
+        e_req = turn.get("endReq", 0)
+        matched = [d["deltaPct"] for d in conv_deltas if s_req and e_req and s_req <= d.get("reqCount", 0) <= e_req]
+        if matched:
+            turns_out.append({**turn, "quotaDeltaPct": round(sum(matched), 4)})
+        else:
+            turns_out.append(turn)
+    return {**metrics, "turns": turns_out}
+
+
+def get_active_payload(
+    requested_cid: str = "",
+    force_refresh: bool = False,
+    compact: bool = False,
+) -> dict:
+    if force_refresh:
+        QUOTA_TRACKER.refresh(force=True)
+
+    cid = requested_cid.strip().lower()
+    conv_meta = None
+
+    if is_valid_cid(cid):
+        conv_meta = {"id": cid}
+        if not (BASE_DIR / "conversations" / f"{cid}.db").is_file():
+            cid = ""
+    else:
+        convs = list_conversations()
+        if convs:
+            conv_meta = convs[0]
+            cid = conv_meta["id"]
+        else:
+            cid = ""
+
+    metrics = inspect_conversation(cid) if cid else None
+    model_name = (metrics or {}).get("latest", {}).get("model", "") if metrics and metrics.get("latest") else ""
+    active_bucket = model_to_bucket(model_name)
+    quota = QUOTA_TRACKER.get_state(cid=cid or None, active_bucket=active_bucket, compact=compact)
+    metrics = attach_turn_quotas(metrics, quota.get("convDeltas") or [])
+
+    return {
+        "conversation": conv_meta,
+        "metrics": metrics,
+        "activeBucket": active_bucket,
+        "quota": quota,
+    }
+
+
+# ---------------------------------------------------------------------------
+# HTTP Server
+# ---------------------------------------------------------------------------
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
@@ -385,52 +1144,50 @@ class Handler(BaseHTTPRequestHandler):
     def _send(self, code: int, content_type: str, body: bytes):
         self.send_response(code)
         self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
         self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        self.wfile.write(body)
+        if body:
+            self.wfile.write(body)
+
+    def do_OPTIONS(self):
+        self._send(204, "text/plain; charset=utf-8", b"")
 
     def do_GET(self):
         parsed = urlparse(self.path)
         qs = parse_qs(parsed.query)
         if parsed.path == "/":
-            self._send(200, "text/html; charset=utf-8", INDEX_HTML.read_bytes())
-        elif parsed.path == "/manifest.webmanifest":
-            self._send(200, "application/manifest+json; charset=utf-8", PWA_MANIFEST)
-        elif parsed.path == "/api/conversations":
-            q = qs.get("q", [""])[0]
-            g = qs.get("group", ["all"])[0]
-            data = list_conversations(query=q, group_filter=g)
+            info = {"service": "agy-metrics", "status": "ok"}
+            self._send(200, "application/json; charset=utf-8", json.dumps(info, ensure_ascii=False).encode("utf-8"))
+        elif parsed.path == "/api/quota":
+            cid = qs.get("id", [""])[0] or None
+            if qs.get("refresh", ["0"])[0] in ("1", "true"):
+                QUOTA_TRACKER.refresh(force=True)
+            data = QUOTA_TRACKER.get_state(cid=cid)
             self._send(200, "application/json; charset=utf-8", json.dumps(data, ensure_ascii=False).encode("utf-8"))
-        elif parsed.path == "/api/metrics":
+        elif parsed.path == "/api/active":
             cid = qs.get("id", [""])[0]
-            data = inspect_conversation(cid)
-            if not data:
-                self._send(404, "application/json; charset=utf-8", b'{"error":"not found"}')
-            else:
-                self._send(200, "application/json; charset=utf-8", json.dumps(data, ensure_ascii=False).encode("utf-8"))
-        elif parsed.path == "/api/events":
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            last_sig = snapshot_signature()
-            try:
-                while True:
-                    time.sleep(0.4)
-                    sig = snapshot_signature()
-                    if sig != last_sig:
-                        last_sig = sig
-                        self.wfile.write(b"event: update\ndata: 1\n\n")
-                        self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError, OSError):
-                pass
+            force = qs.get("refresh", ["0"])[0] in ("1", "true")
+            compact = qs.get("compact", ["0"])[0] in ("1", "true")
+            data = get_active_payload(requested_cid=cid, force_refresh=force, compact=compact)
+            self._send(200, "application/json; charset=utf-8", json.dumps(data, ensure_ascii=False).encode("utf-8"))
+        elif parsed.path == "/api/ping":
+            sig = snapshot_signature()[:3]
+            token = f"{sig[0]}:{sig[1]}:{sig[2]}:{QUOTA_TRACKER.version()}"
+            self._send(200, "application/json; charset=utf-8", json.dumps({"token": token}).encode("utf-8"))
         else:
             self._send(404, "text/plain; charset=utf-8", b"Not Found")
 
     def do_POST(self):
         if urlparse(self.path).path == "/api/shutdown":
+            client_ip = (self.client_address[0] if self.client_address else "")
+            if client_ip not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+                self._send(403, "application/json; charset=utf-8", b'{"error":"loopback only"}')
+                return
             self._send(200, "application/json; charset=utf-8", b'{"ok":true}')
             threading.Thread(target=self.server.shutdown, daemon=True).start()
         else:
@@ -474,6 +1231,7 @@ def main():
     parser.add_argument("--port", type=int, default=int(sidecar_port or "47891"))
     args = parser.parse_args()
     host = "0.0.0.0" if args.lan else args.host
+    start_quota_watcher()
     server = ThreadingHTTPServer((host, args.port), Handler)
     server.daemon_threads = True
     if not sidecar_port:

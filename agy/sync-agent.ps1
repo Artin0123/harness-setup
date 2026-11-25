@@ -1,14 +1,10 @@
-<#
+﻿<#
 .SYNOPSIS
-    建立或同步 agy 自訂代理 (.md)，自動生成標準 YAML 設定並冪等注入 ~\.agents\skills 與跨對話紀錄規則。
+    建立或同步 agy 自訂代理 (.md)，自動生成標準 YAML 設定（excludeDefaultComponents: true 與精選 tools）並冪等注入 ~\.agents\skills 與跨對話紀錄規則。
 .DESCRIPTION
     - 若目標 ~/.gemini/config/agents/<agent>.md 不存在，會自動建立標準範本（含生成指令註解、excludeDefaultComponents: true 與已驗證可用的 tools 清單）。
     - 若檔案已存在，則保留既有的 YAML Frontmatter 與自訂系統提示詞正文，僅冪等更新尾端的 <conversation_transcript> 與 <skills> 區塊。
-    - 冪等鏡像 skills：agy 原生掃描路徑不含 HOME 層級的 ~\.agents\skills（僅工作區 .agents/skills 與全域 ~/.gemini/config/skills 等），
-      本腳本會將各 skill 以位元組級複製鏡像到 ~/.gemini/config/skills，使預設代理、TUI 斜線指令與 Antigravity App/IDE 得以原生發現；
-      實測 agy 掃描器不跟隨 directory junction，故須實體複製。僅鏡像頂層即含 SKILL.md 的資料夾（對齊 native 掃描結構 skills/*/SKILL.md）。
-      ~/.gemini/config/skills 的管理範圍僅限同名：同名資料夾一律刪除重抄以來源為準（殘缺鏡像自動修復），
-      其餘資料夾（如使用者自建 skill）完全不動；來源端已刪除的 skill 其鏡像因無法與自建內容區分，刻意不自動清理，需自行移除。
+    - agy 1.5.16+ 已原生掃描 ~/.agents/skills/*/SKILL.md，不需要複製鏡像到 ~/.gemini/config/skills。
 .EXAMPLE
     pwsh -Command "irm https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/sync-agent.ps1 | iex"
     pwsh -File .\agy\sync-agent.ps1 -Agents build
@@ -19,7 +15,6 @@ param(
     [string[]]$Agents = @("build"),
     [string]$SkillsDir = (Join-Path $HOME ".agents\skills"),
     [string]$AgentsDir = (Join-Path $HOME ".gemini\config\agents"),
-    [string]$GlobalSkillsDir = (Join-Path $HOME ".gemini\config\skills"),
     [string]$AppDataDir = (Join-Path $HOME ".gemini\antigravity-cli"),
     [switch]$DryRun
 )
@@ -196,36 +191,6 @@ if (Test-Path $SkillsDir) {
     }
 }
 
-# 1.5 冪等鏡像 skills → 全域原生掃描路徑 (~/.gemini/config/skills)
-# 根據官方文檔與實測：agy 原生僅掃描工作區 .agents/skills 與全域 ~/.gemini/config/skills 等位置，
-# HOME 層級的 ~\.agents\skills 不在掃描範圍；且掃描器不跟隨 junction（實測驗證），故以位元組級複製鏡像。
-# 僅鏡像「頂層即含 SKILL.md」的資料夾，對齊 native 掃描結構 skills/*/SKILL.md；
-# 深層 SKILL.md 連鏡了也不會被 native glob 發現，刻意不鏡像，僅列於注入區塊供 read_file 使用。
-# 管理範圍僅限同名：同名資料夾一律刪除重抄（以來源為準；重抄中途失敗的殘缺鏡像下次執行亦同機制自癒），
-# config/skills 內其餘資料夾（如使用者自建 skill）完全不動。
-# 來源端已刪除的 skill 其鏡像因無法與使用者自建內容區分，刻意不自動清理，需自行移除。
-$mirroredNames = [System.Collections.Generic.List[string]]::new()
-if (Test-Path $SkillsDir) {
-    $skillDirs = @(Get-ChildItem -LiteralPath $SkillsDir -Directory | Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "SKILL.md") -PathType Leaf })
-    if ($skillDirs.Count -gt 0 -and -not $DryRun -and -not (Test-Path $GlobalSkillsDir)) {
-        New-Item -ItemType Directory -Path $GlobalSkillsDir -Force | Out-Null
-    }
-    foreach ($dir in $skillDirs) {
-        $dest = Join-Path $GlobalSkillsDir $dir.Name
-        if (-not $DryRun) {
-            if (Test-Path -LiteralPath $dest) {
-                Remove-Item -LiteralPath $dest -Recurse -Force
-            }
-            Copy-Item -LiteralPath $dir.FullName -Destination $GlobalSkillsDir -Recurse -Force
-        }
-        $mirroredNames.Add($dir.Name)
-    }
-    if ($DryRun) {
-        Write-Host "[DryRun] 鏡像預覽 ($SkillsDir -> $GlobalSkillsDir) 將鏡像(同名覆蓋): $($mirroredNames -join ', ')" -ForegroundColor Yellow
-    } elseif ($mirroredNames.Count -gt 0) {
-        Write-Host "[OK]已鏡像到 $GlobalSkillsDir (同名覆蓋): $($mirroredNames -join ', ')" -ForegroundColor Green
-    }
-}
 # 2. 組裝注入區塊（直接填入實際絕對路徑，避免 excludeDefaultComponents: true 缺少 <user_information> 時 read_file 因相對路徑失敗）
 $sb = [System.Text.StringBuilder]::new()
 [void]$sb.AppendLine('<conversation_transcript>')

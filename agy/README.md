@@ -6,11 +6,11 @@
 
 ## 插件與腳本功能說明
 
-### 1. `agy/agy-metrics/`（CLI / Remote Control 本地遙測儀表板插件）
-- **主要用途**：專為 `agy` CLI 與 `agy remote-control` 設計的零依賴網頁儀表板（詳見 [`agy-metrics/README.md`](./agy-metrics/README.md)），直接解析本地 `conversations/*.db` 的 Protobuf 遙測資料，無需安裝任何第三方套件。
+### 1. `agy/agy-metrics/`（CLI / Remote Control 本地遙測後端與油猴內嵌插件）
+- **主要用途**：專為 `agy` CLI 與 `agy remote-control` 設計的零依賴本地遙測後端搭配 Tampermonkey 油猴腳本（詳見 [`agy-metrics/README.md`](./agy-metrics/README.md)），直接解析本地 `conversations/*.db` 的 Protobuf 遙測資料並追蹤 5 小時模型額度扣減，無需安裝任何第三方套件。
 - **核心設計**：
   - **自動啟停**：由 `hooks.json` 的 `SessionStart` Hook 自動於背景啟動 `http://127.0.0.1:47891`，並在所有 `agy.exe` 關閉（如 `/exit`）後約 1 秒自動優雅退出。
-  - **SSE 即時更新與輪次彙總**：免輪詢即時刷新，將同輪多次工具呼叫彙總顯示 `TTFT / 總耗時`、純串流速度（`tok/s`）、輸入／輸出拆分、執行時間與當前模型，支援 PWA 獨立視窗與 `--lan` 區網模式。
+  - **內嵌上下文監控與輪次彙總**：透過 `agy-metrics-overlay.user.js` 直接嵌在 Remote Control 對話框模型選擇器右側，即時顯示上下文比例、快取命中率、TTFT／總耗時、純串流速度（`tok/s`）與 5 小時額度扣減，支援 `--lan` 區網與手機連線。
 
 ### 2. `agy/login.ps1`（遠端裝置登入輔助）
 - **主要用途**：讓遠端連線裝置（例如透過手機 SSH 連進 Windows 電腦）能夠輕鬆完成 Google OAuth 登入。
@@ -60,11 +60,11 @@
   ```powershell
   agy plugin install https://github.com/Artin0123/harness-setup/tree/master/agy/agy-metrics
   ```
-- **開啟儀表板**：啟動 `agy` 後會自動拉起背景服務，瀏覽器前往 `http://127.0.0.1:47891` 即可查看（右上角提供 **「前往對話頁面」** 按鈕可直達 Remote Control）；若需手動優雅關閉，可執行 `irm -Method Post http://127.0.0.1:47891/api/shutdown`。
-- **VS Code 快捷鍵自動開啟範例**：
+- **安裝油猴腳本**：啟動 `agy` 後會自動拉起背景後端服務，將 `agy/agy-metrics/agy-metrics-overlay.user.js` 複製貼入 Tampermonkey 即可在 Remote Control 頁面內嵌顯示；若需手動優雅關閉，可執行 `irm -Method Post http://127.0.0.1:47891/api/shutdown`。
+- **VS Code 快捷鍵自動啟動範例（含 `--lan` 區網支援）**：
   ```json
   "args": {
-    "text": "python \"$env:USERPROFILE\\.gemini\\config\\plugins\\agy-metrics\\hooks\\ensure_server.py\"; Start-Process http://127.0.0.1:47891; agy -c --remote-control\r"
+    "text": "python \"$env:USERPROFILE\\.gemini\\config\\plugins\\agy-metrics\\hooks\\ensure_server.py\" --lan; agy -c --remote-control\r"
   }
   ```
 
