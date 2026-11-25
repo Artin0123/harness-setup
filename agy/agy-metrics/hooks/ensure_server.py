@@ -50,7 +50,7 @@ def main() -> None:
                 pythonw = Path(exe).with_name("pythonw.exe")
                 if pythonw.is_file():
                     exe = str(pythonw)
-                flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+                flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
                 subprocess.Popen(
                     [exe, *cmd_args],
                     stdin=subprocess.DEVNULL,

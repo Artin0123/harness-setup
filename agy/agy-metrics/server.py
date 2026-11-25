@@ -466,6 +466,97 @@ def trigger_agy_token_refresh(timeout: float = 12.0) -> bool:
         return False
 
 
+_COMPACT_LOCK = threading.Lock()
+_COMPACT_STATE_LOCK = threading.Lock()
+_COMPACT_IN_PROGRESS = False
+_COMPACT_GRACE_UNTIL = 0.0
+
+
+def _run_agy_hidden(exe: str, args: list[str], timeout: float = 30.0) -> subprocess.CompletedProcess:
+    kwargs: dict = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+        "timeout": timeout,
+    }
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    return subprocess.run([exe, *args], **kwargs)
+
+
+def is_remote_control_daemon_running(exe: str) -> bool:
+    if os.name == "nt":
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
+                val, _ = winreg.QueryValueEx(key, "AntigravityCliDaemon")
+                if val and "remote-control" in str(val).lower() and is_agy_running():
+                    return True
+        except OSError:
+            pass
+    try:
+        res = _run_agy_hidden(exe, ["remote-control", "status"], timeout=10.0)
+        out = ((res.stdout or "") + "\n" + (res.stderr or "")).lower()
+        return "running" in out and "not registered" not in out
+    except Exception:
+        return False
+
+
+def restart_remote_control_daemon(exe: str) -> bool:
+    try:
+        _run_agy_hidden(exe, ["remote-control", "stop"], timeout=15.0)
+        res = _run_agy_hidden(exe, ["remote-control", "start", "--session"], timeout=20.0)
+        return res.returncode == 0
+    except Exception:
+        return False
+
+
+def compact_conversation(cid: str) -> tuple[int, dict]:
+    """Run headless `/compact` on a conversation and reload remote-control daemon if active."""
+    global _COMPACT_IN_PROGRESS, _COMPACT_GRACE_UNTIL
+    clean_cid = (cid or "").strip().lower()
+    if not is_valid_cid(clean_cid):
+        return (400, {"ok": False, "error": "無效的對話 ID"})
+    db_path = BASE_DIR / "conversations" / f"{clean_cid}.db"
+    if not db_path.is_file():
+        return (404, {"ok": False, "error": "找不到對應的對話資料庫"})
+    exe = find_agy_executable()
+    if not exe:
+        return (500, {"ok": False, "error": "找不到 agy 執行檔"})
+
+    if not _COMPACT_LOCK.acquire(blocking=False):
+        return (409, {"ok": False, "error": "已有壓縮作業進行中，請稍候"})
+
+    with _COMPACT_STATE_LOCK:
+        _COMPACT_IN_PROGRESS = True
+    try:
+        res = _run_agy_hidden(exe, ["-r", clean_cid, "-p", "/compact"], timeout=120.0)
+        if res.returncode != 0:
+            detail = (res.stderr or res.stdout or "").strip().splitlines()
+            msg = detail[-1][:120] if detail else f"exit code {res.returncode}"
+            return (500, {"ok": False, "error": f"壓縮失敗：{msg}"})
+
+        with _CONV_CACHE_LOCK:
+            _CONV_CACHE.pop(clean_cid, None)
+
+        restarted = False
+        if is_remote_control_daemon_running(exe):
+            restarted = restart_remote_control_daemon(exe)
+        return (200, {"ok": True, "restartedDaemon": restarted})
+    except subprocess.TimeoutExpired:
+        return (504, {"ok": False, "error": "壓縮逾時（超過 120 秒）"})
+    except Exception as e:
+        return (500, {"ok": False, "error": f"壓縮失敗：{e}"})
+    finally:
+        with _COMPACT_STATE_LOCK:
+            _COMPACT_IN_PROGRESS = False
+            _COMPACT_GRACE_UNTIL = time.time() + 8.0
+        _COMPACT_LOCK.release()
+
+
 def model_to_bucket(model_name: str) -> str:
     low = (model_name or "").lower()
     if any(k in low for k in ("claude", "gpt", "opus", "sonnet")):
@@ -952,28 +1043,73 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, "text/plain; charset=utf-8", b"Not Found")
 
     def do_POST(self):
-        if urlparse(self.path).path == "/api/shutdown":
+        parsed = urlparse(self.path)
+        qs = parse_qs(parsed.query)
+        if parsed.path == "/api/shutdown":
             client_ip = (self.client_address[0] if self.client_address else "")
             if client_ip not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
                 self._send(403, "application/json; charset=utf-8", b'{"error":"loopback only"}')
                 return
             self._send(200, "application/json; charset=utf-8", b'{"ok":true}')
             threading.Thread(target=self.server.shutdown, daemon=True).start()
+        elif parsed.path == "/api/compact":
+            cid = qs.get("id", [""])[0]
+            code, payload = compact_conversation(cid)
+            self._send(code, "application/json; charset=utf-8", json.dumps(payload, ensure_ascii=False).encode("utf-8"))
         else:
             self._send(404, "text/plain; charset=utf-8", b"Not Found")
+
+
+def _is_agy_running_win32() -> bool:
+    """Check if agy.exe is running via Win32 Toolhelp32 snapshot (zero subprocesses)."""
+    TH32CS_SNAPPROCESS = 0x00000002
+    INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wt.DWORD),
+            ("cntUsage", wt.DWORD),
+            ("th32ProcessID", wt.DWORD),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", wt.DWORD),
+            ("cntThreads", wt.DWORD),
+            ("th32ParentProcessID", wt.DWORD),
+            ("pcPriClassBase", wt.LONG),
+            ("dwFlags", wt.DWORD),
+            ("szExeFile", wt.WCHAR * 260),
+        ]
+
+    k32 = ctypes.windll.kernel32
+    k32.CreateToolhelp32Snapshot.argtypes = [wt.DWORD, wt.DWORD]
+    k32.CreateToolhelp32Snapshot.restype = wt.HANDLE
+    k32.Process32FirstW.argtypes = [wt.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    k32.Process32FirstW.restype = wt.BOOL
+    k32.Process32NextW.argtypes = [wt.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    k32.Process32NextW.restype = wt.BOOL
+    k32.CloseHandle.argtypes = [wt.HANDLE]
+    k32.CloseHandle.restype = wt.BOOL
+
+    snap = k32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if snap == INVALID_HANDLE_VALUE or not snap:
+        return True
+    try:
+        pe = PROCESSENTRY32W()
+        pe.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+        if not k32.Process32FirstW(snap, ctypes.byref(pe)):
+            return False
+        while True:
+            if pe.szExeFile.lower() == "agy.exe":
+                return True
+            if not k32.Process32NextW(snap, ctypes.byref(pe)):
+                return False
+    finally:
+        k32.CloseHandle(snap)
 
 
 def is_agy_running() -> bool:
     try:
         if os.name == "nt":
-            out = subprocess.check_output(
-                ["tasklist", "/FI", "IMAGENAME eq agy.exe", "/NH"],
-                creationflags=subprocess.CREATE_NO_WINDOW,
-                text=True,
-                errors="ignore",
-                timeout=3,
-            )
-            return "agy.exe" in out.lower()
+            return _is_agy_running_win32()
         res = subprocess.run(["pgrep", "-x", "agy"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
         return res.returncode == 0
     except Exception:
@@ -985,6 +1121,10 @@ def watch_agy_exit(server: ThreadingHTTPServer) -> None:
     saw_agy = False
     while True:
         time.sleep(1)
+        with _COMPACT_STATE_LOCK:
+            if _COMPACT_IN_PROGRESS or time.time() < _COMPACT_GRACE_UNTIL:
+                saw_agy = True
+                continue
         if is_agy_running():
             saw_agy = True
         elif saw_agy or (time.time() - started_at > 10):

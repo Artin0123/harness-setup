@@ -211,9 +211,36 @@ class TestServerCore(unittest.TestCase):
                     urllib.request.urlopen(f"http://127.0.0.1:{port}{removed}", timeout=3)
                 self.assertEqual(ctx.exception.code, 404, f"Expected 404 for {removed}")
                 ctx.exception.close()
+
+            # POST /api/compact with invalid cid -> 400
+            req_bad = urllib.request.Request(f"http://127.0.0.1:{port}/api/compact?id=../bad", method="POST")
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(req_bad, timeout=3)
+            self.assertEqual(ctx.exception.code, 400)
+            ctx.exception.close()
         finally:
             httpd.shutdown()
             httpd.server_close()
+
+    def test_compact_conversation_with_daemon_restart(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            conv_dir = base / "conversations"
+            conv_dir.mkdir()
+            cid = "11111111-2222-3333-4444-555555555555"
+            (conv_dir / f"{cid}.db").write_bytes(b"")
+
+            fake_ok = mock.Mock(returncode=0, stdout="", stderr="")
+            with mock.patch.object(server, "BASE_DIR", base), \
+                 mock.patch.object(server, "find_agy_executable", return_value="agy.exe"), \
+                 mock.patch.object(server, "_run_agy_hidden", return_value=fake_ok) as run_mock, \
+                 mock.patch.object(server, "is_remote_control_daemon_running", return_value=True), \
+                 mock.patch.object(server, "restart_remote_control_daemon", return_value=True) as restart_mock:
+                code, payload = server.compact_conversation(cid)
+                self.assertEqual(code, 200)
+                self.assertEqual(payload, {"ok": True, "restartedDaemon": True})
+                run_mock.assert_called_once_with("agy.exe", ["-r", cid, "-p", "/compact"], timeout=120.0)
+                restart_mock.assert_called_once_with("agy.exe")
 
 
 if __name__ == "__main__":
