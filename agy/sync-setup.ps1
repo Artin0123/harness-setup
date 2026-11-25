@@ -88,6 +88,13 @@ function Get-TemplateFrontmatterEntries {
         @{ Key = 'description'; Text = "description: $AgentName" },
         @{ Key = 'excludeDefaultComponents'; Text = "excludeDefaultComponents: true" },
         @{
+            Key  = 'plugins'
+            Text = @"
+plugins:
+  - agy-metrics
+"@.TrimEnd("`r", "`n")
+        },
+        @{
             Key  = 'tools'
             Text = @"
 tools:
