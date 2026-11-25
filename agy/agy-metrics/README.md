@@ -20,13 +20,15 @@ agy plugin install https://github.com/Artin0123/harness-setup/tree/master/agy/ag
 - **安裝油猴腳本**：開啟 [GitHub Raw 油猴腳本](https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/agy-metrics/agy-metrics-overlay.user.js) 直接安裝到 Tampermonkey（內建 `@updateURL` / `@downloadURL`，後續可一鍵檢查更新），之後開啟 Remote Control 頁面即可自動連線顯示。
 - **區網／手機連線**：啟動指令加上 `--lan` 改綁 `0.0.0.0:47891`（`POST /api/shutdown` 僅限本機 loopback 呼叫以確保安全）。
 
-### 選配：VS Code 快捷鍵一鍵啟動（純背景 Remote Control 常駐 + `--lan`）
+### 選配：VS Code 快捷鍵一鍵啟動（無閃窗背景 Remote Control 常駐 + `--lan`）
 
 ```json
 "args": {
-  "text": "python \"$env:USERPROFILE\\.gemini\\config\\plugins\\agy-metrics\\hooks\\ensure_server.py\" --lan; agy remote-control start --session; Start-Process 'https://antigravity.google.com/remote?path=%2Fview%2Fremote-control'\r"
+  "text": "python \"$env:USERPROFILE\\.gemini\\config\\plugins\\agy-metrics\\hooks\\ensure_server.py\" --lan --daemon; Start-Process 'https://antigravity.google.com/remote?path=%2Fview%2Fremote-control'\r"
 }
 ```
+
+> 加上 `--daemon` 會以 Windows `CREATE_NO_WINDOW`（隱藏主控台）直接背景啟動 `agy remote-control serve`，避免開網頁時 `agy.exe` 呼叫 `git.exe` 狂閃 Windows Terminal，也不會寫入開機登錄檔或觸發 `schtasks` 權限警告。關閉時執行 `python "$env:USERPROFILE\.gemini\config\plugins\agy-metrics\hooks\ensure_server.py" --stop` 即可一併停掉兩者。
 
 ### 手動優雅關閉背景服務
 

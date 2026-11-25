@@ -487,16 +487,171 @@ def _run_agy_hidden(exe: str, args: list[str], timeout: float = 30.0) -> subproc
     return subprocess.run([exe, *args], **kwargs)
 
 
+def _win32_get_cmdline(pid: int) -> str:
+    """Read a process's CommandLine via Win32 PEB (zero subprocesses, no Admin needed)."""
+    class UNICODE_STRING(ctypes.Structure):
+        _fields_ = [("Length", wt.USHORT), ("MaximumLength", wt.USHORT), ("Buffer", ctypes.c_void_p)]
+
+    class PBI(ctypes.Structure):
+        _fields_ = [
+            ("Reserved1", ctypes.c_void_p),
+            ("PebBaseAddress", ctypes.c_void_p),
+            ("Reserved2", ctypes.c_void_p * 2),
+            ("UniqueProcessId", ctypes.c_size_t),
+            ("Reserved3", ctypes.c_void_p),
+        ]
+
+    k32 = ctypes.windll.kernel32
+    nt = ctypes.windll.ntdll
+    k32.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+    k32.OpenProcess.restype = wt.HANDLE
+    k32.ReadProcessMemory.argtypes = [
+        wt.HANDLE, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)
+    ]
+    k32.ReadProcessMemory.restype = wt.BOOL
+    k32.CloseHandle.argtypes = [wt.HANDLE]
+    k32.CloseHandle.restype = wt.BOOL
+
+    h = k32.OpenProcess(0x1010, False, pid)
+    if not h:
+        return ""
+    try:
+        pbi = PBI()
+        if nt.NtQueryInformationProcess(h, 0, ctypes.byref(pbi), ctypes.sizeof(pbi), None) != 0 or not pbi.PebBaseAddress:
+            return ""
+        params_ptr = ctypes.c_void_p()
+        read = ctypes.c_size_t()
+        if not k32.ReadProcessMemory(h, pbi.PebBaseAddress + 0x20, ctypes.byref(params_ptr), ctypes.sizeof(params_ptr), ctypes.byref(read)):
+            return ""
+        if not params_ptr.value:
+            return ""
+        us = UNICODE_STRING()
+        if not k32.ReadProcessMemory(h, params_ptr.value + 0x70, ctypes.byref(us), ctypes.sizeof(us), ctypes.byref(read)):
+            return ""
+        if not us.Length or not us.Buffer:
+            return ""
+        buf = (wt.WCHAR * (us.Length // 2))()
+        if not k32.ReadProcessMemory(h, us.Buffer, buf, us.Length, ctypes.byref(read)):
+            return ""
+        return buf.value
+    except Exception:
+        return ""
+    finally:
+        k32.CloseHandle(h)
+
+
+def _win32_list_agy_pids() -> list[int]:
+    """Return PIDs of all running agy.exe processes via Win32 Toolhelp32 snapshot."""
+    TH32CS_SNAPPROCESS = 0x00000002
+    INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wt.DWORD),
+            ("cntUsage", wt.DWORD),
+            ("th32ProcessID", wt.DWORD),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", wt.DWORD),
+            ("cntThreads", wt.DWORD),
+            ("th32ParentProcessID", wt.DWORD),
+            ("pcPriClassBase", wt.LONG),
+            ("dwFlags", wt.DWORD),
+            ("szExeFile", wt.WCHAR * 260),
+        ]
+
+    k32 = ctypes.windll.kernel32
+    k32.CreateToolhelp32Snapshot.argtypes = [wt.DWORD, wt.DWORD]
+    k32.CreateToolhelp32Snapshot.restype = wt.HANDLE
+    k32.Process32FirstW.argtypes = [wt.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    k32.Process32FirstW.restype = wt.BOOL
+    k32.Process32NextW.argtypes = [wt.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    k32.Process32NextW.restype = wt.BOOL
+    k32.CloseHandle.argtypes = [wt.HANDLE]
+    k32.CloseHandle.restype = wt.BOOL
+
+    snap = k32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if snap == INVALID_HANDLE_VALUE or not snap:
+        return []
+    pids: list[int] = []
+    try:
+        pe = PROCESSENTRY32W()
+        pe.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+        if k32.Process32FirstW(snap, ctypes.byref(pe)):
+            while True:
+                if pe.szExeFile.lower() == "agy.exe":
+                    pids.append(pe.th32ProcessID)
+                if not k32.Process32NextW(snap, ctypes.byref(pe)):
+                    break
+    finally:
+        k32.CloseHandle(snap)
+    return pids
+
+
+def find_remote_control_serve_pids() -> list[int]:
+    if os.name != "nt":
+        return []
+    out = []
+    for pid in _win32_list_agy_pids():
+        cmd = _win32_get_cmdline(pid).lower()
+        if "remote-control" in cmd and "serve" in cmd:
+            out.append(pid)
+    return out
+
+
+def start_remote_control_serve(exe: str) -> bool:
+    """Start `agy remote-control serve` with a hidden console (CREATE_NO_WINDOW) so child git.exe calls never flash."""
+    try:
+        if os.name == "nt":
+            flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+            subprocess.Popen(
+                [exe, "remote-control", "serve"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=flags,
+                close_fds=True,
+            )
+            return True
+        subprocess.Popen(
+            [exe, "remote-control", "serve"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def stop_remote_control_serve_pids(pids: list[int]) -> None:
+    if os.name != "nt" or not pids:
+        return
+    k32 = ctypes.windll.kernel32
+    k32.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+    k32.OpenProcess.restype = wt.HANDLE
+    k32.TerminateProcess.argtypes = [wt.HANDLE, wt.UINT]
+    k32.TerminateProcess.restype = wt.BOOL
+    k32.CloseHandle.argtypes = [wt.HANDLE]
+    k32.CloseHandle.restype = wt.BOOL
+    for pid in pids:
+        h = k32.OpenProcess(0x0001, False, pid)  # PROCESS_TERMINATE
+        if h:
+            try:
+                k32.TerminateProcess(h, 0)
+            finally:
+                k32.CloseHandle(h)
+    deadline = time.time() + 3.0
+    while time.time() < deadline:
+        if not find_remote_control_serve_pids():
+            break
+        time.sleep(0.1)
+
+
 def is_remote_control_daemon_running(exe: str) -> bool:
     if os.name == "nt":
-        try:
-            import winreg
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
-                val, _ = winreg.QueryValueEx(key, "AntigravityCliDaemon")
-                if val and "remote-control" in str(val).lower() and is_agy_running():
-                    return True
-        except OSError:
-            pass
+        return bool(find_remote_control_serve_pids())
     try:
         res = _run_agy_hidden(exe, ["remote-control", "status"], timeout=10.0)
         out = ((res.stdout or "") + "\n" + (res.stderr or "")).lower()
@@ -506,6 +661,10 @@ def is_remote_control_daemon_running(exe: str) -> bool:
 
 
 def restart_remote_control_daemon(exe: str) -> bool:
+    if os.name == "nt":
+        pids = find_remote_control_serve_pids()
+        stop_remote_control_serve_pids(pids)
+        return start_remote_control_serve(exe)
     try:
         _run_agy_hidden(exe, ["remote-control", "stop"], timeout=15.0)
         res = _run_agy_hidden(exe, ["remote-control", "start", "--session"], timeout=20.0)
@@ -1060,56 +1219,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, "text/plain; charset=utf-8", b"Not Found")
 
 
-def _is_agy_running_win32() -> bool:
-    """Check if agy.exe is running via Win32 Toolhelp32 snapshot (zero subprocesses)."""
-    TH32CS_SNAPPROCESS = 0x00000002
-    INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
-
-    class PROCESSENTRY32W(ctypes.Structure):
-        _fields_ = [
-            ("dwSize", wt.DWORD),
-            ("cntUsage", wt.DWORD),
-            ("th32ProcessID", wt.DWORD),
-            ("th32DefaultHeapID", ctypes.c_size_t),
-            ("th32ModuleID", wt.DWORD),
-            ("cntThreads", wt.DWORD),
-            ("th32ParentProcessID", wt.DWORD),
-            ("pcPriClassBase", wt.LONG),
-            ("dwFlags", wt.DWORD),
-            ("szExeFile", wt.WCHAR * 260),
-        ]
-
-    k32 = ctypes.windll.kernel32
-    k32.CreateToolhelp32Snapshot.argtypes = [wt.DWORD, wt.DWORD]
-    k32.CreateToolhelp32Snapshot.restype = wt.HANDLE
-    k32.Process32FirstW.argtypes = [wt.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
-    k32.Process32FirstW.restype = wt.BOOL
-    k32.Process32NextW.argtypes = [wt.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
-    k32.Process32NextW.restype = wt.BOOL
-    k32.CloseHandle.argtypes = [wt.HANDLE]
-    k32.CloseHandle.restype = wt.BOOL
-
-    snap = k32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
-    if snap == INVALID_HANDLE_VALUE or not snap:
-        return True
-    try:
-        pe = PROCESSENTRY32W()
-        pe.dwSize = ctypes.sizeof(PROCESSENTRY32W)
-        if not k32.Process32FirstW(snap, ctypes.byref(pe)):
-            return False
-        while True:
-            if pe.szExeFile.lower() == "agy.exe":
-                return True
-            if not k32.Process32NextW(snap, ctypes.byref(pe)):
-                return False
-    finally:
-        k32.CloseHandle(snap)
-
-
 def is_agy_running() -> bool:
     try:
         if os.name == "nt":
-            return _is_agy_running_win32()
+            return bool(_win32_list_agy_pids())
         res = subprocess.run(["pgrep", "-x", "agy"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
         return res.returncode == 0
     except Exception:

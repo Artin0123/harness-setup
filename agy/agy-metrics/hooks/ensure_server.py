@@ -29,15 +29,50 @@ def stop_server(port: int) -> None:
         pass
 
 
+def _import_server():
+    parent = str(Path(__file__).resolve().parent.parent)
+    if parent not in sys.path:
+        sys.path.insert(0, parent)
+    import server
+    return server
+
+
+def ensure_remote_control_daemon() -> None:
+    srv = _import_server()
+    exe = srv.find_agy_executable()
+    if not exe:
+        return
+    if srv.is_remote_control_daemon_running(exe):
+        return
+    if srv.start_remote_control_serve(exe):
+        time.sleep(1.5)
+
+
+def stop_remote_control_daemon() -> None:
+    srv = _import_server()
+    if os.name == "nt":
+        pids = srv.find_remote_control_serve_pids()
+        srv.stop_remote_control_serve_pids(pids)
+    else:
+        exe = srv.find_agy_executable()
+        if exe:
+            subprocess.run([exe, "remote-control", "stop"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--stop", action="store_true", help="Gracefully stop the background server")
+    parser.add_argument("--stop", action="store_true", help="Stop both agy remote-control serve and agy-metrics server")
     parser.add_argument("--lan", action="store_true", help="Bind to 0.0.0.0 for LAN access")
+    parser.add_argument("--daemon", action="store_true", help="Also ensure agy remote-control serve runs with a hidden console")
     args = parser.parse_args()
 
     if args.stop:
+        stop_remote_control_daemon()
         stop_server(PORT)
         return
+
+    if args.daemon:
+        ensure_remote_control_daemon()
 
     if not is_listening(PORT):
         server_py = Path(__file__).resolve().parent.parent / "server.py"
