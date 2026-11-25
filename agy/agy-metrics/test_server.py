@@ -286,12 +286,30 @@ class TestEnsureServer(unittest.TestCase):
             self.es.REMOTE_URL,
         )
         self.assertEqual(
+            self.es.build_remote_url("7c598ac2-f03d-4548-a073-aad41497bcc6-v2", user=2),
+            "https://antigravity.google.com/u/2/remote?path=%2Fview%2Fremote-control",
+        )
+        self.assertEqual(
+            self.es.build_remote_url("7c598ac2-f03d-4548-a073-aad41497bcc6-v2", user=0),
+            "https://antigravity.google.com/u/0/remote?path=%2Fview%2Fremote-control",
+        )
+        self.assertEqual(
             self.es.build_remote_url(
                 "7c598ac2-f03d-4548-a073-aad41497bcc6-v2",
                 "51019dc7-497c-46f1-a9b0-3326b303304a",
                 "9c8f0368-9c1b-41b4-8e87-ae309004fe68",
             ),
             "https://antigravity.google.com/r/7c598ac2-f03d-4548-a073-aad41497bcc6-v2"
+            "?p=c%2F51019dc7-497c-46f1-a9b0-3326b303304a%3Fproject%3D9c8f0368-9c1b-41b4-8e87-ae309004fe68",
+        )
+        self.assertEqual(
+            self.es.build_remote_url(
+                "7c598ac2-f03d-4548-a073-aad41497bcc6-v2",
+                "51019dc7-497c-46f1-a9b0-3326b303304a",
+                "9c8f0368-9c1b-41b4-8e87-ae309004fe68",
+                user=2,
+            ),
+            "https://antigravity.google.com/u/2/r/7c598ac2-f03d-4548-a073-aad41497bcc6-v2"
             "?p=c%2F51019dc7-497c-46f1-a9b0-3326b303304a%3Fproject%3D9c8f0368-9c1b-41b4-8e87-ae309004fe68",
         )
 
@@ -319,6 +337,19 @@ class TestEnsureServer(unittest.TestCase):
                     "https://antigravity.google.com/r/7c598ac2-f03d-4548-a073-aad41497bcc6-v2"
                     "?p=c%2F51019dc7-497c-46f1-a9b0-3326b303304a%3Fproject%3D9c8f0368-9c1b-41b4-8e87-ae309004fe68"
                 )
+                mock_open.reset_mock()
+                self.es.wait_and_open_remote(
+                    "cli-20261125_160000.log",
+                    cid="51019dc7-497c-46f1-a9b0-3326b303304a",
+                    project_id="9c8f0368-9c1b-41b4-8e87-ae309004fe68",
+                    user=2,
+                    log_dir=log_dir,
+                    timeout_sec=5.0,
+                )
+                mock_open.assert_called_once_with(
+                    "https://antigravity.google.com/u/2/r/7c598ac2-f03d-4548-a073-aad41497bcc6-v2"
+                    "?p=c%2F51019dc7-497c-46f1-a9b0-3326b303304a%3Fproject%3D9c8f0368-9c1b-41b4-8e87-ae309004fe68"
+                )
 
     def test_main_modes_default_open_remote_and_fixed(self):
         cid = "51019dc7-497c-46f1-a9b0-3326b303304a"
@@ -336,17 +367,36 @@ class TestEnsureServer(unittest.TestCase):
             mock_latest.assert_called_once()
             self.assertIn("--_cid", mock_spawn.call_args.args[0])
             self.assertIn(cid, mock_spawn.call_args.args[0])
+            self.assertNotIn("--_user", mock_spawn.call_args.args[0])
+
+            mock_spawn.reset_mock()
+            self.es.main(["--open-remote", "--user", "2"])
+            spawn_args = mock_spawn.call_args.args[0]
+            self.assertIn("--_user", spawn_args)
+            self.assertEqual(spawn_args[spawn_args.index("--_user") + 1], "2")
+
+            mock_spawn.reset_mock()
+            self.es.main(["--open-remote", "--user", "0"])
+            spawn_args = mock_spawn.call_args.args[0]
+            self.assertIn("--_user", spawn_args)
+            self.assertEqual(spawn_args[spawn_args.index("--_user") + 1], "0")
 
             mock_latest.reset_mock()
             mock_spawn.reset_mock()
-            self.es.main(["--open-remote", "fixed"])
+            self.es.main(["--open-remote", "fixed", "--user", "2"])
             mock_latest.assert_not_called()
-            self.assertNotIn("--_cid", mock_spawn.call_args.args[0])
+            spawn_args = mock_spawn.call_args.args[0]
+            self.assertNotIn("--_cid", spawn_args)
+            self.assertIn("--_user", spawn_args)
+            self.assertEqual(spawn_args[spawn_args.index("--_user") + 1], "2")
 
             mock_spawn.reset_mock()
             with mock.patch.object(self.es, "get_latest_conversation", return_value=("", "")):
                 self.es.main(["--open-remote"])
                 mock_spawn.assert_not_called()
+
+            with self.assertRaises(SystemExit):
+                self.es.main(["--open-remote", "--user", "-1"])
 
 
 if __name__ == "__main__":

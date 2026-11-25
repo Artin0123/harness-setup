@@ -13,7 +13,9 @@ import urllib.request
 from pathlib import Path
 
 PORT = 47891
-REMOTE_URL = "https://antigravity.google.com/remote?path=%2Fview%2Fremote-control"
+BASE_URL = "https://antigravity.google.com"
+REMOTE_PATH = "/remote?path=%2Fview%2Fremote-control"
+REMOTE_URL = f"{BASE_URL}{REMOTE_PATH}"
 _CID_RE = re.compile(r"^[0-9a-fA-F-]{8,64}$")
 _REMOTE_CONNECTED_RE = re.compile(
     r"\[remote-control-([0-9a-fA-F-]+-v2)\] Connection status: Connected"
@@ -94,19 +96,26 @@ def get_latest_conversation(db_path: Path | None = None) -> tuple[str, str]:
             con.close()
 
 
-def build_remote_url(session_id: str, cid: str = "", project_id: str = "") -> str:
+def build_remote_url(
+    session_id: str,
+    cid: str = "",
+    project_id: str = "",
+    user: int | None = None,
+) -> str:
+    prefix = f"{BASE_URL}/u/{user}" if user is not None else BASE_URL
     if not cid:
-        return REMOTE_URL
+        return f"{prefix}{REMOTE_PATH}"
     inner = f"c/{cid}"
     if project_id:
         inner = f"{inner}?project={project_id}"
-    return f"https://antigravity.google.com/r/{session_id}?p={urllib.parse.quote(inner, safe='')}"
+    return f"{prefix}/r/{session_id}?p={urllib.parse.quote(inner, safe='')}"
 
 
 def wait_and_open_remote(
     after_log: str = "",
     cid: str = "",
     project_id: str = "",
+    user: int | None = None,
     log_dir: Path | None = None,
     timeout_sec: float = 20.0,
 ) -> None:
@@ -128,7 +137,7 @@ def wait_and_open_remote(
                     continue
                 m = _REMOTE_CONNECTED_RE.search(text)
                 if m:
-                    webbrowser.open(build_remote_url(m.group(1), cid, project_id))
+                    webbrowser.open(build_remote_url(m.group(1), cid, project_id, user=user))
                     return
         time.sleep(0.25)
 
@@ -145,13 +154,27 @@ def main(argv: list[str] | None = None) -> None:
         choices=("latest", "fixed"),
         help="Wait for a new agy Remote Control session and open it in the browser (default: latest; use 'fixed' for the generic entry URL)",
     )
+    parser.add_argument(
+        "--user",
+        type=int,
+        default=None,
+        help="Google account index for /u/<index> in the Remote Control URL (e.g. 2)",
+    )
     parser.add_argument("--_wait-remote", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--_cid", default="", help=argparse.SUPPRESS)
     parser.add_argument("--_pid", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--_user", type=int, default=None, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    if args.user is not None and args.user < 0:
+        parser.error("--user must be >= 0")
 
     if args._wait_remote is not None:
-        wait_and_open_remote(args._wait_remote, cid=args._cid, project_id=args._pid)
+        wait_and_open_remote(
+            args._wait_remote,
+            cid=args._cid,
+            project_id=args._pid,
+            user=args._user,
+        )
         return
 
     if args.stop:
@@ -183,6 +206,8 @@ def main(argv: list[str] | None = None) -> None:
             wait_args.extend(["--_cid", cid])
             if project_id:
                 wait_args.extend(["--_pid", project_id])
+        if args.user is not None:
+            wait_args.extend(["--_user", str(args.user)])
         spawn_detached(wait_args)
 
 

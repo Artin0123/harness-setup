@@ -36,7 +36,7 @@ irm https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/sync-se
 }
 ```
 
-（若網頁端只需開啟固定入口，可改傳 `--open-remote fixed`。）
+（若網頁端只需開啟固定入口，可改傳 `--open-remote fixed`；若需指定 Google 帳號索引，例如 `/u/2`，可加上 `--user 2`。）
 
 ### 手動優雅關閉背景服務
 
