@@ -1,4 +1,4 @@
-# get-agy-token.ps1 - fetch a FRESH Antigravity / Gemini access token to clipboard.
+﻿# get-agy-token.ps1 - fetch a FRESH Antigravity / Gemini access token to clipboard.
 $ErrorActionPreference = 'Stop'
 
 # 1. 定位 agy.exe
@@ -45,8 +45,9 @@ public class AgyCred {
 '@
 if (-not ('AgyCred' -as [type])) { Add-Type -TypeDefinition $sig -Language CSharp }
 
-# 4. 雙來源讀取 (Windows 憑證庫 + SSH 檔案備援)
-$candidates = @()
+# 4. 雙來源讀取（對齊 agy ChainedAuth：桌面優先 Windows 憑證庫，SSH 退回檔案；雙來源帳號不同時對照最新 cli-*.log）
+$fileCand = $null
+$credCand = $null
 
 $tokenFile = Join-Path $env:USERPROFILE '.gemini\antigravity-cli\antigravity-oauth-token'
 if (Test-Path $tokenFile) {
@@ -57,7 +58,7 @@ if (Test-Path $tokenFile) {
       if ($parsed.token.access_token) {
         $expVal = [datetime]::MinValue
         if ($parsed.token.expiry) { try { $expVal = [datetime]::Parse($parsed.token.expiry).ToLocalTime() } catch {} }
-        $candidates += [PSCustomObject]@{ Json = $parsed; Expiry = $expVal }
+        $fileCand = [PSCustomObject]@{ Json = $parsed; Expiry = $expVal; Email = ([string]$parsed.id_token_email).Trim() }
       }
     }
   } catch {}
@@ -70,16 +71,45 @@ try {
     if ($parsed.token.access_token) {
       $expVal = [datetime]::MinValue
       if ($parsed.token.expiry) { try { $expVal = [datetime]::Parse($parsed.token.expiry).ToLocalTime() } catch {} }
-      $candidates += [PSCustomObject]@{ Json = $parsed; Expiry = $expVal }
+      $credCand = [PSCustomObject]@{ Json = $parsed; Expiry = $expVal; Email = ([string]$parsed.id_token_email).Trim() }
     }
   }
 } catch {}
 
-if ($candidates.Count -eq 0) {
+if (-not $credCand -and -not $fileCand) {
   throw 'no token found in Credential Manager or local token file'
 }
 
-$best = $candidates | Sort-Object Expiry -Descending | Select-Object -First 1
+$best = $null
+if ($credCand -and -not $fileCand) {
+  $best = $credCand
+} elseif ($fileCand -and -not $credCand) {
+  $best = $fileCand
+} elseif ($credCand.Email -eq $fileCand.Email) {
+  $best = if ($fileCand.Expiry -gt $credCand.Expiry) { $fileCand } else { $credCand }
+} else {
+  $logEmail = ''
+  $logDir = Join-Path $env:USERPROFILE '.gemini\antigravity-cli\log'
+  if (Test-Path $logDir) {
+    $recentLogs = Get-ChildItem -Path $logDir -Filter 'cli-*.log' -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 10
+    foreach ($lf in $recentLogs) {
+      $curEmail = ''
+      foreach ($line in (Get-Content -Path $lf.FullName -ErrorAction SilentlyContinue)) {
+        if ($line -match 'Logging out current user') {
+          $curEmail = ''
+        } elseif ($line -match 'authenticated successfully as ([^\s@,;)\]]+@[^\s@,;)\]]+)') {
+          $curEmail = $matches[1].Trim().TrimEnd('.')
+        }
+      }
+      if ($curEmail) { $logEmail = $curEmail; break }
+    }
+  }
+  if ($logEmail -and $logEmail -eq $fileCand.Email) {
+    $best = $fileCand
+  } else {
+    $best = $credCand
+  }
+}
 $json = $best.Json
 $tok = $json.token.access_token
 if (-not $tok) { throw 'no token.access_token in credential' }

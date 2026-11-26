@@ -23,7 +23,7 @@
 - **主要用途**：提供給無法進行標準 OAuth 互動流程的環境（例如嵌入式 iframe 視窗、無頭工作環境），使其可透過已授權的 Access Token 連線。
 - **解決的痛點**：
   - 免帶參數，執行時自動透過 `agy models` 發起一次認證請求以確保 Token 處於最新刷新狀態。
-  - **雙來源備援讀取**：Windows SSH 連線（Type 3 Network Logon）會隔離 Windows 憑證庫，本腳本能同時搜尋 Windows 憑證管理員（`gemini:antigravity`）與本地檔案（`~/.gemini/antigravity-cli/antigravity-oauth-token`），自動挑選最新有效的 Token。
+  - **雙來源對齊讀取**：Windows SSH 連線（Type 3 Network Logon）會隔離 Windows 憑證庫，本腳本對齊 `agy` 的 `ChainedAuth` 順序（桌面優先讀取 Windows 憑證管理員 `gemini:antigravity`，SSH 自動退回本地檔案 `~/.gemini/antigravity-cli/antigravity-oauth-token`；若兩者同時存在且帳號不同，自動對照最新 `cli-*.log` 選出當前生效帳號）。
   - **安全防洩漏**：不直接在終端機印出敏感的 raw access token，而是直接將 Token 複製到系統剪貼簿，僅在畫面上顯示帳號、長度與剩餘有效分鐘數。
 
 ### 4. `agy/capture_schema.py`（本地 Schema 抓包與代理檢驗）
@@ -57,11 +57,11 @@
   agy plugin install https://github.com/Artin0123/harness-setup/tree/master/agy/agy-metrics
   ```
 - **安裝油猴腳本**：啟動 `agy` 後會自動拉起背景後端服務，開啟 [GitHub Raw 油猴腳本](https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/agy-metrics/agy-metrics-overlay.user.js) 安裝到 Tampermonkey 即可在 Remote Control 頁面內嵌顯示並自動檢查更新；若需手動優雅關閉，可執行 `irm -Method Post http://127.0.0.1:47891/api/shutdown`。
-- **VS Code 快捷鍵自動啟動範例（自動接續最新對話 + 就緒後直達網頁 + `--lan`）**：
-  先執行 `irm https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/sync-setup.ps1 | iex` 同步 [`agy/latest_cid.py`](./latest_cid.py)（純 CLI 也可單獨執行 `agy -r (python "$env:USERPROFILE\.gemini\config\scripts\latest_cid.py")` 直接進最新對話打 `/compact`）：
+- **VS Code 快捷鍵自動啟動範例（自動接續最新有效專案對話 + 就緒後直達網頁 + `--lan`）**：
+  先執行 `irm https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/sync-setup.ps1 | iex` 同步 [`agy/latest_cid.py`](./latest_cid.py)（`latest_cid.py` 與 `ensure_server.py` 皆優先挑選所屬 `~\.gemini\config\projects\<project_id>.json` 存在的最新頂層對話，自動略過 `outside-of-project` 與已刪專案以避免 CLI 跳出 `Invalid Project` 警告；若全庫皆無有效專案對話則統一退回最新一筆頂層對話。純 CLI 也可單獨執行 `agy -r (python "$env:USERPROFILE\.gemini\config\scripts\latest_cid.py")` 直接進對話打 `/compact`）：
   ```json
   "args": {
-    "text": "python \"$env:USERPROFILE\\.gemini\\config\\plugins\\agy-metrics\\hooks\\ensure_server.py\" --lan --open-remote; agy -r (python \"$env:USERPROFILE\\.gemini\\config\\scripts\\latest_cid.py\") --remote-control\r"
+    "text": "python \"$env:USERPROFILE\\.gemini\\config\\plugins\\agy-metrics\\hooks\\ensure_server.py\" --lan --open-remote; $cid = python \"$env:USERPROFILE\\.gemini\\config\\scripts\\latest_cid.py\"; if ($cid) { agy -r $cid --remote-control } else { agy --remote-control }\r"
   }
   ```
 

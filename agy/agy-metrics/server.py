@@ -6,6 +6,7 @@ import ctypes
 import ctypes.wintypes as wt
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -19,7 +20,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 BASE_DIR = Path.home() / ".gemini" / "antigravity-cli"
-QUOTA_DB_PATH = BASE_DIR / "agy_metrics_quota.db"
+PLUGIN_DATA_DIR = BASE_DIR / "plugin_data" / "agy-metrics"
+QUOTA_DB_PATH = PLUGIN_DATA_DIR / "agy_metrics_quota.db"
 CLOUDCODE_BASE = "https://daily-cloudcode-pa.googleapis.com"
 USER_AGENT = "antigravity/1.5.16"
 
@@ -397,37 +399,141 @@ def _read_windows_credential(target: str) -> str | None:
         return None
 
 
-def read_oauth_token() -> tuple[str | None, str | None, str | None]:
-    """Return (access_token, expiry_iso, email) from Windows Credential Manager or token file."""
-    candidates: list[tuple[float, str, str | None, str | None]] = []
+_AUTH_EMAIL_RE = re.compile(r"authenticated successfully as ([^\s@,;)\]]+@[^\s@,;)\]]+)")
+_SEND_CID_RE = re.compile(r"SEND_USER_CASCADE_MESSAGE_LATENCY\b.*?cascade_id:([0-9a-fA-F-]{8,64})")
+_LOGOUT_MARKER = "Logging out current user"
+_CLI_LOG_CACHE: dict[str, tuple[int, int, dict[str, str], str]] = {}
+_CLI_LOG_CACHE_LOCK = threading.Lock()
 
-    token_file = BASE_DIR / "antigravity-oauth-token"
+
+def _norm_email(val: str | None) -> str:
+    return val.strip().lower() if isinstance(val, str) else ""
+
+
+def _parse_cli_log_cached(log_file: Path) -> tuple[dict[str, str], str]:
+    """Parse a single agy cli-*.log into ({cid_lower: last_request_email}, final_auth_email)."""
+    try:
+        st = log_file.stat()
+    except OSError:
+        return {}, ""
+    key = str(log_file)
+    with _CLI_LOG_CACHE_LOCK:
+        cached = _CLI_LOG_CACHE.get(key)
+        if cached and cached[0] == st.st_mtime_ns and cached[1] == st.st_size:
+            return cached[2], cached[3]
+
+    try:
+        text = log_file.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return {}, ""
+
+    conv_emails: dict[str, str] = {}
+    cur_email = ""
+    for line in text.splitlines():
+        if _LOGOUT_MARKER in line:
+            cur_email = ""
+            continue
+        m_auth = _AUTH_EMAIL_RE.search(line)
+        if m_auth:
+            cur_email = m_auth.group(1).strip().rstrip(".")
+            continue
+        if cur_email:
+            m_cid = _SEND_CID_RE.search(line)
+            if m_cid:
+                conv_emails[m_cid.group(1).lower()] = cur_email
+
+    with _CLI_LOG_CACHE_LOCK:
+        if len(_CLI_LOG_CACHE) > 512:
+            _CLI_LOG_CACHE.clear()
+        _CLI_LOG_CACHE[key] = (st.st_mtime_ns, st.st_size, conv_emails, cur_email)
+    return conv_emails, cur_email
+
+
+def get_latest_cli_log_email(log_dir: Path | None = None, limit: int = 10) -> str:
+    """Return the most recent authenticated account email seen in agy cli-*.log files."""
+    directory = log_dir or (BASE_DIR / "log")
+    if not directory.is_dir():
+        return ""
+    logs = sorted(directory.glob("cli-*.log"), key=lambda p: p.name, reverse=True)[:limit]
+    for log_file in logs:
+        _, final_email = _parse_cli_log_cached(log_file)
+        if final_email:
+            return final_email
+    return ""
+
+
+def get_conversation_last_account(cid: str, log_dir: Path | None = None) -> str:
+    """Return the Google account email used for the latest user request of `cid` from agy cli-*.log."""
+    target = (cid or "").strip().lower()
+    if not target:
+        return ""
+    directory = log_dir or (BASE_DIR / "log")
+    if not directory.is_dir():
+        return ""
+    logs = sorted(directory.glob("cli-*.log"), key=lambda p: p.name, reverse=True)
+    for log_file in logs:
+        conv_emails, _ = _parse_cli_log_cached(log_file)
+        email = conv_emails.get(target)
+        if email:
+            return email
+    return ""
+
+
+def read_oauth_token(
+    base_dir: Path | None = None,
+    log_dir: Path | None = None,
+) -> tuple[str | None, str | None, str | None]:
+    """Return (access_token, expiry_iso, email) following agy ChainedAuth precedence.
+
+    Prefers Windows Credential Manager (keyring) on desktop and falls back to
+    `antigravity-oauth-token` (SSH). When both exist with different emails,
+    disambiguates using the latest active cli-*.log auth event.
+    """
+    root = base_dir or BASE_DIR
+    file_cand: tuple[float, str, str | None, str | None] | None = None
+    cred_cand: tuple[float, str, str | None, str | None] | None = None
+
+    token_file = root / "antigravity-oauth-token"
     if token_file.is_file():
         try:
             parsed = json.loads(token_file.read_text(encoding="utf-8", errors="ignore"))
             tok = (parsed.get("token") or {}).get("access_token")
             if tok:
                 exp_s = (parsed.get("token") or {}).get("expiry")
-                candidates.append((_parse_iso_ts(exp_s), tok, exp_s, parsed.get("id_token_email")))
+                file_cand = (_parse_iso_ts(exp_s), tok, exp_s, parsed.get("id_token_email"))
         except Exception:
             pass
 
-    raw_cred = _read_windows_credential("gemini:antigravity")
-    if raw_cred:
-        try:
-            parsed = json.loads(raw_cred)
-            tok = (parsed.get("token") or {}).get("access_token")
-            if tok:
-                exp_s = (parsed.get("token") or {}).get("expiry")
-                candidates.append((_parse_iso_ts(exp_s), tok, exp_s, parsed.get("id_token_email")))
-        except Exception:
-            pass
+    if base_dir is None:
+        raw_cred = _read_windows_credential("gemini:antigravity")
+        if raw_cred:
+            try:
+                parsed = json.loads(raw_cred)
+                tok = (parsed.get("token") or {}).get("access_token")
+                if tok:
+                    exp_s = (parsed.get("token") or {}).get("expiry")
+                    cred_cand = (_parse_iso_ts(exp_s), tok, exp_s, parsed.get("id_token_email"))
+            except Exception:
+                pass
 
-    if not candidates:
+    if cred_cand and not file_cand:
+        _, tok, exp_s, email = cred_cand
+        return (tok, exp_s, email)
+    if file_cand and not cred_cand:
+        _, tok, exp_s, email = file_cand
+        return (tok, exp_s, email)
+    if not cred_cand and not file_cand:
         return (None, None, None)
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    _, tok, exp_s, email = candidates[0]
-    return (tok, exp_s, email)
+
+    if _norm_email(cred_cand[3]) == _norm_email(file_cand[3]):
+        best = file_cand if file_cand[0] > cred_cand[0] else cred_cand
+        return (best[1], best[2], best[3])
+
+    resolved_log_dir = log_dir if log_dir is not None else (root / "log")
+    log_email = _norm_email(get_latest_cli_log_email(resolved_log_dir))
+    if log_email and log_email == _norm_email(file_cand[3]):
+        return (file_cand[1], file_cand[2], file_cand[3])
+    return (cred_cand[1], cred_cand[2], cred_cand[3])
 
 
 def find_agy_executable() -> str | None:
@@ -530,6 +636,7 @@ class QuotaTracker:
         self._last_cli_refresh_ts: float = 0.0
         self._last_fetch_ts: float = 0.0
         self._last_token: str | None = None
+        self._last_email: str | None = None
         self._error: str | None = None
         self._version: int = 0
 
@@ -654,6 +761,19 @@ class QuotaTracker:
         tok, _, _ = read_oauth_token()
         return bool(tok and tok != prev_tok)
 
+    def has_auth_change(self) -> bool:
+        with self._lock:
+            prev_tok = self._last_token
+            prev_email = _norm_email(self._last_email)
+            errored = bool(self._error)
+        tok, _, email = read_oauth_token()
+        curr_email = _norm_email(email)
+        if curr_email and prev_email and curr_email != prev_email:
+            return True
+        if errored and tok and tok != prev_tok:
+            return True
+        return False
+
     def _fetch_buckets(self, token: str) -> dict[str, dict]:
         buckets: dict[str, dict] = {}
         # 1. Fetch per-model quotaInfo (7-digit float32 precision for Gemini & 3P models)
@@ -709,8 +829,11 @@ class QuotaTracker:
         token, expiry, email = read_oauth_token()
         with self._lock:
             token_changed = bool(token and token != self._last_token)
+            curr_email = _norm_email(email)
+            prev_email = _norm_email(self._last_email)
+            email_changed = bool(curr_email and prev_email and curr_email != prev_email)
             cooldown = 4.0 if force else min_interval
-            if not token_changed and (now - self._last_fetch_ts < cooldown):
+            if not token_changed and not email_changed and (now - self._last_fetch_ts < cooldown):
                 return False
             self._last_fetch_ts = now
             self._last_token = token
@@ -756,6 +879,28 @@ class QuotaTracker:
         with self._lock:
             self._error = None
             self._version += 1
+            curr_email = _norm_email(email)
+            prev_email = _norm_email(self._last_email)
+            account_switched = bool(curr_email and prev_email and curr_email != prev_email)
+            if curr_email:
+                self._last_email = curr_email
+            if account_switched:
+                # Reset all bucket baselines on account switch to avoid bogus cross-account deltas
+                self._bucket_acc = {
+                    bkey: {
+                        "fraction": binfo["remainingFraction"],
+                        "resetTime": binfo.get("resetTime", ""),
+                        "acc_reqs": 0,
+                        "acc_uncached": 0,
+                        "acc_cached": 0,
+                        "acc_out": 0,
+                        "last_cid": "",
+                        "last_model": "",
+                        "last_req_count": 0,
+                    }
+                    for bkey, binfo in buckets.items()
+                }
+                return True
 
             for bkey, binfo in buckets.items():
                 curr_frac = binfo["remainingFraction"]
@@ -913,7 +1058,7 @@ def start_quota_watcher() -> None:
             if pending_refresh_at and time.time() >= pending_refresh_at:
                 pending_refresh_at = 0.0
                 QUOTA_TRACKER.refresh(force=False, min_interval=10.0)
-            elif tick % 3 == 0 and QUOTA_TRACKER.has_new_token_while_errored():
+            elif tick % 3 == 0 and QUOTA_TRACKER.has_auth_change():
                 QUOTA_TRACKER.refresh(force=True)
 
     threading.Thread(target=_loop, daemon=True).start()
@@ -949,7 +1094,9 @@ def get_active_payload(requested_cid: str = "", force_refresh: bool = False) -> 
         cid = ""
 
     metrics = inspect_conversation(cid) if cid else None
-    model_name = (metrics or {}).get("latest", {}).get("model", "") if metrics and metrics.get("latest") else ""
+    has_latest = bool(metrics and metrics.get("latest"))
+    model_name = metrics["latest"].get("model", "") if has_latest else ""
+    account_email = get_conversation_last_account(cid) if (cid and has_latest) else ""
     active_bucket = model_to_bucket(model_name)
     quota = QUOTA_TRACKER.get_state(cid=cid or None, active_bucket=active_bucket)
     metrics = attach_turn_quotas(metrics, quota.get("convDeltas") or [])
@@ -957,6 +1104,7 @@ def get_active_payload(requested_cid: str = "", force_refresh: bool = False) -> 
     return {
         "conversation": conv_meta,
         "metrics": metrics,
+        "accountEmail": account_email,
         "activeBucket": active_bucket,
         "quota": quota,
     }

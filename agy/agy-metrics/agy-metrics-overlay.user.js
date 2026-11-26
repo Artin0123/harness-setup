@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         agy-metrics Remote Control 內嵌上下文監控
 // @namespace    https://github.com/Artin0123/harness-setup
-// @version      2.1.6
+// @version      2.1.7
 // @description  在 antigravity.google.com 對話框模型選擇器右側內嵌上下文進度環按鈕，即時顯示對話統計與 5h 額度消耗，支援手機橫向滑動、動態高度貼合標題欄與區網主機 IP 連線（連接本機或區網 agy-metrics；支援跨網域 iframe 與 Google Trusted Types）。
 // @updateURL    https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/agy-metrics/agy-metrics-overlay.user.js
 // @downloadURL  https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/agy-metrics/agy-metrics-overlay.user.js
@@ -415,6 +415,7 @@
   const emptyActiveData = (cid = '', quota = null) => ({
     conversation: cid ? { id: cid } : null,
     metrics: null,
+    accountEmail: '',
     quota: quota
       ? { ...quota, convDeltas: [], convTotalDeltaPct: null }
       : { convDeltas: [], convTotalDeltaPct: null },
@@ -607,9 +608,12 @@
   mo.observe(document.body || document.documentElement, { childList: true, subtree: true });
   mountInlineButton();
 
-  const kvRow = (label, valueNode, valueId = null) => {
+  const kvRow = (label, valueNode, opts = null) => {
     const valProps = { className: 'kv-v' };
-    if (valueId) valProps.id = valueId;
+    if (opts) {
+      if (opts.id) valProps.id = opts.id;
+      if (opts.title) valProps.title = opts.title;
+    }
     return h('div', { className: 'kv' },
       h('span', { className: 'kv-k' }, label),
       h('span', valProps, valueNode)
@@ -755,8 +759,9 @@
     if (!isOpen) return;
 
     const convId = lastData.conversation?.id || '';
+    const accountEmail = lastData.accountEmail || '';
     const displayErr = q.error || '';
-    const renderKey = `${convId}|${m?.mtimeMs || 0}|${t?.requests || 0}|${l?.model || ''}|${l?.contextTokens ?? ''}|${l?.maxContextTokens ?? ''}|${q.convTotalDeltaPct ?? ''}|${displayErr}`;
+    const renderKey = `${convId}|${m?.mtimeMs || 0}|${t?.requests || 0}|${l?.model || ''}|${accountEmail}|${l?.contextTokens ?? ''}|${l?.maxContextTokens ?? ''}|${q.convTotalDeltaPct ?? ''}|${displayErr}`;
     if (renderKey === lastRenderKey) return;
     lastRenderKey = renderKey;
     lastHostPromptKey = '';
@@ -773,15 +778,23 @@
     if (displayErr) children.push(h('div', { className: 'err-banner' }, displayErr));
 
     const convDeltaTotal = q.convTotalDeltaPct;
+    const modelText = l?.model || '—';
+    const accountText = accountEmail || '—';
+    const usedCtxNode = l && l.contextTokens != null
+      ? h('span', { className: pctClass(ctxPct) }, fmtTok(l.contextTokens))
+      : '—';
+    const maxCtxText = l && l.maxContextTokens ? fmtTok(l.maxContextTokens) : '—';
 
     children.push(
       h('div', { className: 'summary-wrap' },
         h('div', { className: 'sub-card' },
-          kvRow('模型名稱', l?.model || '—'),
-          kvRow('上下文', l ? h('span', null, h('span', { className: pctClass(ctxPct) }, fmtTok(l.contextTokens)), ` / ${l.maxContextTokens ? fmtTok(l.maxContextTokens) : '—'}`) : '—')
+          kvRow('模型名稱', modelText, { title: l?.model || '' }),
+          kvRow('已用上下文', usedCtxNode),
+          kvRow('上下文上限', maxCtxText)
         ),
         h('div', { className: 'sub-card' },
-          kvRow('上次請求', fmtAge(lastMtimeMs), 'agy-last-age'),
+          kvRow('帳號', accountText, { title: accountEmail }),
+          kvRow('上次請求', fmtAge(lastMtimeMs), { id: 'agy-last-age' }),
           kvRow('快取命中率', `${cachePct.toFixed(1)}%`)
         )
       )
