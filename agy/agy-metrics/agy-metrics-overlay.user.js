@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         agy-metrics Remote Control 內嵌上下文監控
 // @namespace    https://github.com/Artin0123/harness-setup
-// @version      2.1.5
+// @version      2.1.6
 // @description  在 antigravity.google.com 對話框模型選擇器右側內嵌上下文進度環按鈕，即時顯示對話統計與 5h 額度消耗，支援手機橫向滑動、動態高度貼合標題欄與區網主機 IP 連線（連接本機或區網 agy-metrics；支援跨網域 iframe 與 Google Trusted Types）。
 // @updateURL    https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/agy-metrics/agy-metrics-overlay.user.js
 // @downloadURL  https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/agy-metrics/agy-metrics-overlay.user.js
@@ -397,6 +397,8 @@
   let hostInputDraft = storeGet(HOST_STORE_KEY, '');
   let hostFeedback = '';
   let hostTesting = false;
+  let autoConnecting = false;
+  let lastHostPromptKey = '';
   let pollGen = 0;
   let pingTimer = null;
   let lastSigToken = '';
@@ -502,6 +504,9 @@
       lastRenderKey = '';
       render();
       positionPanel();
+    } else {
+      composerRO.disconnect();
+      observedComposer = null;
     }
   };
 
@@ -571,15 +576,16 @@
     const container = anchor?.parentElement;
     if (!container) return false;
 
+    if (triggerBtn.parentElement === container && triggerBtn.previousElementSibling === anchor) {
+      return true;
+    }
+
     if (container.previousElementSibling) {
       container.previousElementSibling.style.flexShrink = '0';
     }
     container.dataset.agyScrollRow = '1';
     anchor.style.flexShrink = '0';
 
-    if (triggerBtn.parentElement === container && triggerBtn.previousElementSibling === anchor) {
-      return true;
-    }
     anchor.insertAdjacentElement('afterend', triggerBtn);
     if (isOpen) positionPanel();
     return true;
@@ -670,6 +676,13 @@
   };
 
   const renderHostPrompt = () => {
+    const promptKey = `${hostTesting}|${hostFeedback}`;
+    if (promptKey === lastHostPromptKey && panelEl.querySelector('.host-form')) {
+      positionPanel();
+      return;
+    }
+    lastHostPromptKey = promptKey;
+
     const inputEl = h('input', {
       type: 'text',
       className: 'host-input',
@@ -704,11 +717,23 @@
   const render = () => {
     mountInlineButton();
 
-    if (needsHostInput || !lastData) {
+    if (needsHostInput) {
       setRing(0, '#ff6b6b');
       inlineLabelEl.textContent = '離線';
       lastRenderKey = '';
       if (isOpen) renderHostPrompt();
+      return;
+    }
+
+    if (!lastData) {
+      setRing(0, '#64748b');
+      inlineLabelEl.textContent = '連線中';
+      lastRenderKey = '';
+      if (isOpen) {
+        lastHostPromptKey = '';
+        panelEl.replaceChildren(h('div', { className: 'host-box' }, h('div', { className: 'host-title' }, '連線中...')));
+        positionPanel();
+      }
       return;
     }
 
@@ -717,7 +742,7 @@
     const l = m?.latest;
     const t = m?.totals;
     const turns = m?.turns || [];
-    const ctxPct = l && l.maxContextTokens ? (l.contextTokens / l.maxContextTokens) * 100 : 0;
+    const ctxPct = l && l.maxContextTokens && l.contextTokens != null ? (l.contextTokens / l.maxContextTokens) * 100 : 0;
 
     if (l && l.maxContextTokens) {
       setRing(ctxPct, ctxColor(ctxPct));
@@ -731,9 +756,10 @@
 
     const convId = lastData.conversation?.id || '';
     const displayErr = q.error || '';
-    const renderKey = `${convId}|${m?.mtimeMs || 0}|${t?.requests || 0}|${q.convTotalDeltaPct ?? ''}|${displayErr}`;
+    const renderKey = `${convId}|${m?.mtimeMs || 0}|${t?.requests || 0}|${l?.model || ''}|${l?.contextTokens ?? ''}|${l?.maxContextTokens ?? ''}|${q.convTotalDeltaPct ?? ''}|${displayErr}`;
     if (renderKey === lastRenderKey) return;
     lastRenderKey = renderKey;
+    lastHostPromptKey = '';
 
     lastMtimeMs = m?.mtimeMs || 0;
     const cachePct = t && t.totalIn ? (t.cachedIn / t.totalIn) * 100 : 0;
@@ -752,7 +778,7 @@
       h('div', { className: 'summary-wrap' },
         h('div', { className: 'sub-card' },
           kvRow('模型名稱', l?.model || '—'),
-          kvRow('上下文', l ? h('span', null, h('span', { className: pctClass(ctxPct) }, fmtTok(l.contextTokens)), `/${l.maxContextTokens ? fmtTok(l.maxContextTokens) : '—'}`) : '—')
+          kvRow('上下文', l ? h('span', null, h('span', { className: pctClass(ctxPct) }, fmtTok(l.contextTokens)), ` / ${l.maxContextTokens ? fmtTok(l.maxContextTokens) : '—'}`) : '—')
         ),
         h('div', { className: 'sub-card' },
           kvRow('上次請求', fmtAge(lastMtimeMs), 'agy-last-age'),
@@ -890,44 +916,50 @@
   };
 
   const autoConnect = async () => {
-    const localConvId = currentConvId;
-    const localRes = await gmGetJson(buildActiveUrl(LOCAL_BASE), 1800);
-    if (localRes.ok) {
-      activeBase = LOCAL_BASE;
-      needsHostInput = false;
-      hostFeedback = '';
-      lastData = normalizeActiveData(localRes.data);
-      lastSigToken = '';
-      render();
-      startPingLoop(++pollGen);
-      if (currentConvId && currentConvId !== localConvId) fetchActive();
-      return;
-    }
-
-    const savedRaw = storeGet(HOST_STORE_KEY, '');
-    const savedBase = normalizeHostToBase(savedRaw);
-    if (savedBase && savedBase !== LOCAL_BASE) {
-      hostInputDraft = savedRaw;
-      const savedConvId = currentConvId;
-      const savedRes = await gmGetJson(buildActiveUrl(savedBase), 2500);
-      if (savedRes.ok) {
-        activeBase = savedBase;
+    if (autoConnecting) return;
+    autoConnecting = true;
+    try {
+      const localConvId = currentConvId;
+      const localRes = await gmGetJson(buildActiveUrl(LOCAL_BASE), 1800);
+      if (localRes.ok) {
+        activeBase = LOCAL_BASE;
         needsHostInput = false;
         hostFeedback = '';
-        lastData = normalizeActiveData(savedRes.data);
+        lastData = normalizeActiveData(localRes.data);
         lastSigToken = '';
         render();
         startPingLoop(++pollGen);
-        if (currentConvId && currentConvId !== savedConvId) fetchActive();
+        if (currentConvId && currentConvId !== localConvId) fetchActive();
         return;
       }
-      handleDisconnect(`無法連線到先前設定的 ${savedBase}（${savedRes.error}）`);
-      return;
-    }
 
-    needsHostInput = true;
-    hostFeedback = '';
-    render();
+      const savedRaw = storeGet(HOST_STORE_KEY, '');
+      const savedBase = normalizeHostToBase(savedRaw);
+      if (savedBase && savedBase !== LOCAL_BASE) {
+        hostInputDraft = savedRaw;
+        const savedConvId = currentConvId;
+        const savedRes = await gmGetJson(buildActiveUrl(savedBase), 2500);
+        if (savedRes.ok) {
+          activeBase = savedBase;
+          needsHostInput = false;
+          hostFeedback = '';
+          lastData = normalizeActiveData(savedRes.data);
+          lastSigToken = '';
+          render();
+          startPingLoop(++pollGen);
+          if (currentConvId && currentConvId !== savedConvId) fetchActive();
+          return;
+        }
+        handleDisconnect(`無法連線到先前設定的 ${savedBase}（${savedRes.error}）`);
+        return;
+      }
+
+      needsHostInput = true;
+      hostFeedback = '';
+      render();
+    } finally {
+      autoConnecting = false;
+    }
   };
 
   // Lightweight 1s local tick updates relative age text and guards SPA route changes
@@ -941,7 +973,7 @@
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') {
       if (activeBase) fetchActive();
-      else if (!hostTesting) autoConnect();
+      else if (!hostTesting && !autoConnecting) autoConnect();
     }
   });
 
