@@ -1,8 +1,8 @@
-<#
+﻿<#
 .SYNOPSIS
     同步 agy 個人環境設定：建立或更新自訂代理 (.md) 與 Skills／對話規則注入，並同步常用輔助腳本（latest_cid.py）至 ~\.gemini\config\scripts。
 .DESCRIPTION
-    - 若目標 ~/.gemini/config/agents/<agent>.md 不存在，會自動建立標準範本（含生成指令註解、excludeDefaultComponents: true 與已驗證可用的 tools 清單）。
+    - 若目標 ~/.gemini/config/agents/<agent>.md 不存在，會自動建立標準範本（含生成指令註解、excludeDefaultComponents: true、inheritCustomizations: false 與已驗證可用的 tools 清單）。
     - 若檔案已存在，則保留既有的 YAML Frontmatter 與自訂系統提示詞正文，僅冪等更新尾端的 <conversation_transcript> 與 <skills> 區塊。
     - agy 1.5.16+ 已原生掃描 ~/.agents/skills/*/SKILL.md，不需要複製鏡像到 ~/.gemini/config/skills。
     - 同步 agy/latest_cid.py 到 ~/.gemini/config/scripts/latest_cid.py（本地優先複製，遠端 irm|iex 則從 GitHub Raw 下載）。
@@ -88,10 +88,17 @@ function Get-TemplateFrontmatterEntries {
         @{ Key = 'description'; Text = "description: $AgentName" },
         @{ Key = 'excludeDefaultComponents'; Text = "excludeDefaultComponents: true" },
         @{
+            Key  = 'inheritCustomizations'
+            Text = @"
+# 不自動套用全域的 hooks、plugins 與 workflows（rules 與 skills 清單已由上面的 excludeDefaultComponents: true 拔除，這裡改 false 不會再影響它們）
+inheritCustomizations: false
+"@.TrimEnd("`r", "`n")
+        },
+        @{
             Key  = 'plugins'
             Text = @"
-plugins:
-  - agy-metrics
+# 搭配 inheritCustomizations: false，只啟用寫在這裡的 plugin；[] 代表全關（所有 hook 包含 PreToolUse / PostToolUse / Stop / SessionStart、plugin 內建的 MCP 與 subagent 都不會載入）
+plugins: []
 "@.TrimEnd("`r", "`n")
         },
         @{

@@ -280,18 +280,51 @@ class TestEnsureServer(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             self.assertEqual(self.es.get_latest_conversation(Path(tmpdir) / "missing.db"), ("", ""))
 
+    def test_get_active_user_email_from_token_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            self.assertEqual(self.es.get_active_user_email(base), "")
+            (base / "antigravity-oauth-token").write_text("{not-json", encoding="utf-8")
+            self.assertEqual(self.es.get_active_user_email(base), "")
+            (base / "antigravity-oauth-token").write_text(
+                json.dumps({
+                    "id_token_email": "alice@example.com",
+                    "token": {"access_token": "tok", "expiry": "2026-11-26T12:00:00Z"},
+                }),
+                encoding="utf-8",
+            )
+            self.assertEqual(self.es.get_active_user_email(base), "alice@example.com")
+
+    def test_get_active_user_email_picks_newest_expiry_across_sources(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fake_home = Path(tmpdir)
+            cli_dir = fake_home / ".gemini" / "antigravity-cli"
+            cli_dir.mkdir(parents=True)
+            (cli_dir / "antigravity-oauth-token").write_text(
+                json.dumps({
+                    "id_token_email": "older@example.com",
+                    "token": {"expiry": "2026-11-26T10:00:00Z"},
+                }),
+                encoding="utf-8",
+            )
+            newer_cred = json.dumps({
+                "id_token_email": "newer@example.com",
+                "token": {"expiry": "2026-11-26T12:00:00Z"},
+            })
+            with (
+                mock.patch("pathlib.Path.home", return_value=fake_home),
+                mock.patch.object(self.es, "_read_windows_credential", return_value=newer_cred),
+            ):
+                self.assertEqual(self.es.get_active_user_email(), "newer@example.com")
+
     def test_build_remote_url(self):
         self.assertEqual(
             self.es.build_remote_url("7c598ac2-f03d-4548-a073-aad41497bcc6-v2"),
             self.es.REMOTE_URL,
         )
         self.assertEqual(
-            self.es.build_remote_url("7c598ac2-f03d-4548-a073-aad41497bcc6-v2", user=2),
-            "https://antigravity.google.com/u/2/remote?path=%2Fview%2Fremote-control",
-        )
-        self.assertEqual(
-            self.es.build_remote_url("7c598ac2-f03d-4548-a073-aad41497bcc6-v2", user=0),
-            "https://antigravity.google.com/u/0/remote?path=%2Fview%2Fremote-control",
+            self.es.build_remote_url("7c598ac2-f03d-4548-a073-aad41497bcc6-v2", authuser="alice@example.com"),
+            "https://antigravity.google.com/remote?path=%2Fview%2Fremote-control&authuser=alice%40example.com",
         )
         self.assertEqual(
             self.es.build_remote_url(
@@ -307,10 +340,11 @@ class TestEnsureServer(unittest.TestCase):
                 "7c598ac2-f03d-4548-a073-aad41497bcc6-v2",
                 "51019dc7-497c-46f1-a9b0-3326b303304a",
                 "9c8f0368-9c1b-41b4-8e87-ae309004fe68",
-                user=2,
+                authuser="alice@example.com",
             ),
-            "https://antigravity.google.com/u/2/r/7c598ac2-f03d-4548-a073-aad41497bcc6-v2"
-            "?p=c%2F51019dc7-497c-46f1-a9b0-3326b303304a%3Fproject%3D9c8f0368-9c1b-41b4-8e87-ae309004fe68",
+            "https://antigravity.google.com/r/7c598ac2-f03d-4548-a073-aad41497bcc6-v2"
+            "?p=c%2F51019dc7-497c-46f1-a9b0-3326b303304a%3Fproject%3D9c8f0368-9c1b-41b4-8e87-ae309004fe68"
+            "&authuser=alice%40example.com",
         )
 
     def test_wait_and_open_remote_reads_new_log_and_opens_direct_url(self):
@@ -342,13 +376,14 @@ class TestEnsureServer(unittest.TestCase):
                     "cli-20261125_160000.log",
                     cid="51019dc7-497c-46f1-a9b0-3326b303304a",
                     project_id="9c8f0368-9c1b-41b4-8e87-ae309004fe68",
-                    user=2,
+                    authuser="alice@example.com",
                     log_dir=log_dir,
                     timeout_sec=5.0,
                 )
                 mock_open.assert_called_once_with(
-                    "https://antigravity.google.com/u/2/r/7c598ac2-f03d-4548-a073-aad41497bcc6-v2"
+                    "https://antigravity.google.com/r/7c598ac2-f03d-4548-a073-aad41497bcc6-v2"
                     "?p=c%2F51019dc7-497c-46f1-a9b0-3326b303304a%3Fproject%3D9c8f0368-9c1b-41b4-8e87-ae309004fe68"
+                    "&authuser=alice%40example.com"
                 )
 
     def test_main_modes_default_open_remote_and_fixed(self):
@@ -357,6 +392,7 @@ class TestEnsureServer(unittest.TestCase):
         with (
             mock.patch.object(self.es, "is_listening", return_value=True),
             mock.patch.object(self.es, "get_latest_conversation", return_value=(cid, pid)) as mock_latest,
+            mock.patch.object(self.es, "get_active_user_email", return_value=""),
             mock.patch.object(self.es, "spawn_detached") as mock_spawn,
         ):
             self.es.main([])
@@ -367,36 +403,43 @@ class TestEnsureServer(unittest.TestCase):
             mock_latest.assert_called_once()
             self.assertIn("--_cid", mock_spawn.call_args.args[0])
             self.assertIn(cid, mock_spawn.call_args.args[0])
-            self.assertNotIn("--_user", mock_spawn.call_args.args[0])
+            self.assertNotIn("--_authuser", mock_spawn.call_args.args[0])
 
             mock_spawn.reset_mock()
-            self.es.main(["--open-remote", "--user", "2"])
-            spawn_args = mock_spawn.call_args.args[0]
-            self.assertIn("--_user", spawn_args)
-            self.assertEqual(spawn_args[spawn_args.index("--_user") + 1], "2")
-
-            mock_spawn.reset_mock()
-            self.es.main(["--open-remote", "--user", "0"])
-            spawn_args = mock_spawn.call_args.args[0]
-            self.assertIn("--_user", spawn_args)
-            self.assertEqual(spawn_args[spawn_args.index("--_user") + 1], "0")
+            with mock.patch.object(self.es, "get_active_user_email", return_value="alice@example.com"):
+                self.es.main(["--open-remote"])
+                spawn_args = mock_spawn.call_args.args[0]
+                self.assertIn("--_authuser", spawn_args)
+                self.assertEqual(spawn_args[spawn_args.index("--_authuser") + 1], "alice@example.com")
 
             mock_latest.reset_mock()
             mock_spawn.reset_mock()
-            self.es.main(["--open-remote", "fixed", "--user", "2"])
-            mock_latest.assert_not_called()
-            spawn_args = mock_spawn.call_args.args[0]
-            self.assertNotIn("--_cid", spawn_args)
-            self.assertIn("--_user", spawn_args)
-            self.assertEqual(spawn_args[spawn_args.index("--_user") + 1], "2")
+            with mock.patch.object(self.es, "get_active_user_email", return_value="alice@example.com"):
+                self.es.main(["--open-remote", "fixed"])
+                mock_latest.assert_not_called()
+                spawn_args = mock_spawn.call_args.args[0]
+                self.assertNotIn("--_cid", spawn_args)
+                self.assertIn("--_authuser", spawn_args)
+                self.assertEqual(spawn_args[spawn_args.index("--_authuser") + 1], "alice@example.com")
 
             mock_spawn.reset_mock()
             with mock.patch.object(self.es, "get_latest_conversation", return_value=("", "")):
                 self.es.main(["--open-remote"])
                 mock_spawn.assert_not_called()
 
-            with self.assertRaises(SystemExit):
-                self.es.main(["--open-remote", "--user", "-1"])
+        with mock.patch.object(self.es, "wait_and_open_remote") as mock_wait:
+            self.es.main([
+                "--_wait-remote", "cli-20261125_160000.log",
+                "--_cid", cid,
+                "--_pid", pid,
+                "--_authuser", "alice@example.com",
+            ])
+            mock_wait.assert_called_once_with(
+                "cli-20261125_160000.log",
+                cid=cid,
+                project_id=pid,
+                authuser="alice@example.com",
+            )
 
 
 if __name__ == "__main__":

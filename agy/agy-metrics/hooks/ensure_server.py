@@ -2,6 +2,7 @@
 """Ensure agy-metrics backend server is running in background on 127.0.0.1:47891."""
 
 import argparse
+import json
 import os
 import re
 import socket
@@ -11,6 +12,7 @@ import time
 import traceback
 import urllib.parse
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 PORT = 47891
@@ -116,26 +118,124 @@ def get_latest_conversation(db_path: Path | None = None) -> tuple[str, str]:
             con.close()
 
 
+def _parse_iso_ts(val: str | None) -> float:
+    if not val:
+        return 0.0
+    try:
+        s = val.strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        if "." in s:
+            head, tail = s.split(".", 1)
+            tz_pos = max(tail.find("+"), tail.find("-"))
+            if tz_pos != -1:
+                frac, tz = tail[:tz_pos][:6], tail[tz_pos:]
+                s = f"{head}.{frac}{tz}"
+            else:
+                s = f"{head}.{tail[:6]}"
+        return datetime.fromisoformat(s).timestamp()
+    except Exception:
+        return 0.0
+
+
+def _read_windows_credential(target: str) -> str | None:
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        import ctypes.wintypes as wt
+
+        class CREDENTIAL(ctypes.Structure):
+            _fields_ = [
+                ("Flags", wt.DWORD), ("Type", wt.DWORD), ("TargetName", wt.LPWSTR),
+                ("Comment", wt.LPWSTR), ("LastWritten", wt.FILETIME),
+                ("CredentialBlobSize", wt.DWORD), ("CredentialBlob", ctypes.POINTER(ctypes.c_byte)),
+                ("Persist", wt.DWORD), ("AttributeCount", wt.DWORD), ("Attributes", ctypes.c_void_p),
+                ("TargetAlias", wt.LPWSTR), ("UserName", wt.LPWSTR),
+            ]
+
+        advapi32 = ctypes.windll.advapi32
+        advapi32.CredReadW.argtypes = [wt.LPWSTR, wt.DWORD, wt.DWORD, ctypes.POINTER(ctypes.POINTER(CREDENTIAL))]
+        advapi32.CredReadW.restype = wt.BOOL
+        advapi32.CredFree.argtypes = [ctypes.c_void_p]
+
+        pcred = ctypes.POINTER(CREDENTIAL)()
+        if not advapi32.CredReadW(target, 1, 0, ctypes.byref(pcred)):
+            return None
+        try:
+            raw = ctypes.string_at(pcred.contents.CredentialBlob, pcred.contents.CredentialBlobSize)
+            return raw.decode("utf-8", errors="ignore")
+        finally:
+            advapi32.CredFree(pcred)
+    except Exception:
+        return None
+
+
+def _extract_email_candidate(raw: str) -> tuple[float, str] | None:
+    try:
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            return None
+        email = parsed.get("id_token_email")
+        if isinstance(email, str) and email.strip():
+            token = parsed.get("token")
+            exp_s = token.get("expiry") if isinstance(token, dict) else None
+            return (_parse_iso_ts(exp_s), email.strip())
+    except Exception:
+        pass
+    return None
+
+
+def get_active_user_email(base_dir: Path | None = None) -> str:
+    """Return the active agy Google account email from OAuth credentials, or empty string."""
+    candidates: list[tuple[float, str]] = []
+    root = base_dir or (Path.home() / ".gemini" / "antigravity-cli")
+
+    token_file = root / "antigravity-oauth-token"
+    if token_file.is_file():
+        try:
+            cand = _extract_email_candidate(token_file.read_text(encoding="utf-8", errors="ignore"))
+            if cand is not None:
+                candidates.append(cand)
+        except OSError:
+            pass
+
+    raw_cred = _read_windows_credential("gemini:antigravity") if base_dir is None else None
+    if raw_cred:
+        cand = _extract_email_candidate(raw_cred)
+        if cand is not None:
+            candidates.append(cand)
+
+    if not candidates:
+        return ""
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return candidates[0][1]
+
+
 def build_remote_url(
     session_id: str,
     cid: str = "",
     project_id: str = "",
-    user: int | None = None,
+    authuser: str = "",
 ) -> str:
-    prefix = f"{BASE_URL}/u/{user}" if user is not None else BASE_URL
+    auth_suffix = (
+        f"&authuser={urllib.parse.quote(authuser, safe='')}"
+        if authuser
+        else ""
+    )
     if not cid:
-        return f"{prefix}{REMOTE_PATH}"
+        return f"{REMOTE_URL}{auth_suffix}"
     inner = f"c/{cid}"
     if project_id:
         inner = f"{inner}?project={project_id}"
-    return f"{prefix}/r/{session_id}?p={urllib.parse.quote(inner, safe='')}"
+    return f"{BASE_URL}/r/{session_id}?p={urllib.parse.quote(inner, safe='')}{auth_suffix}"
 
 
 def wait_and_open_remote(
     after_log: str = "",
     cid: str = "",
     project_id: str = "",
-    user: int | None = None,
+    authuser: str = "",
     log_dir: Path | None = None,
     timeout_sec: float = 20.0,
 ) -> None:
@@ -144,7 +244,8 @@ def wait_and_open_remote(
     directory = log_dir or (Path.home() / ".gemini" / "antigravity-cli" / "log")
     _log(
         f"wait_and_open_remote start: after_log={after_log!r} cid={cid!r} "
-        f"project_id={project_id!r} user={user!r} log_dir={directory} timeout={timeout_sec}s"
+        f"project_id={project_id!r} authuser={authuser!r} "
+        f"log_dir={directory} timeout={timeout_sec}s"
     )
     deadline = time.monotonic() + timeout_sec
     seen_candidates: set[str] = set()
@@ -166,7 +267,12 @@ def wait_and_open_remote(
                     continue
                 m = _REMOTE_CONNECTED_RE.search(text)
                 if m:
-                    url = build_remote_url(m.group(1), cid, project_id, user=user)
+                    url = build_remote_url(
+                        m.group(1),
+                        cid,
+                        project_id,
+                        authuser=authuser,
+                    )
                     try:
                         opened = webbrowser.open(url)
                         _log(
@@ -205,19 +311,11 @@ def main(argv: list[str] | None = None) -> None:
         choices=("latest", "fixed"),
         help="Wait for a new agy Remote Control session and open it in the browser (default: latest; use 'fixed' for the generic entry URL)",
     )
-    parser.add_argument(
-        "--user",
-        type=int,
-        default=None,
-        help="Google account index for /u/<index> in the Remote Control URL (e.g. 2)",
-    )
     parser.add_argument("--_wait-remote", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--_cid", default="", help=argparse.SUPPRESS)
     parser.add_argument("--_pid", default="", help=argparse.SUPPRESS)
-    parser.add_argument("--_user", type=int, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--_authuser", default="", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
-    if args.user is not None and args.user < 0:
-        parser.error("--user must be >= 0")
 
     if args._wait_remote is not None:
         try:
@@ -225,7 +323,7 @@ def main(argv: list[str] | None = None) -> None:
                 args._wait_remote,
                 cid=args._cid,
                 project_id=args._pid,
-                user=args._user,
+                authuser=args._authuser,
             )
         except Exception:
             _log(f"_wait_remote crashed:\n{traceback.format_exc().rstrip()}")
@@ -261,10 +359,11 @@ def main(argv: list[str] | None = None) -> None:
             wait_args.extend(["--_cid", cid])
             if project_id:
                 wait_args.extend(["--_pid", project_id])
-        if args.user is not None:
-            wait_args.extend(["--_user", str(args.user)])
+        authuser = get_active_user_email()
+        if authuser:
+            wait_args.extend(["--_authuser", authuser])
         _log(
-            f"main --open-remote={args.open_remote} user={args.user!r} "
+            f"main --open-remote={args.open_remote} authuser={authuser!r} "
             f"cid={cid!r} pid={project_id!r} after_log={after_log!r}; spawning waiter"
         )
         spawn_detached(wait_args)

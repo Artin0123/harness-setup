@@ -749,8 +749,8 @@
     children.push(
       h('div', { className: 'summary-wrap' },
         h('div', { className: 'sub-card' },
-          kvRow('已用上下文', l ? h('span', { className: pctClass(ctxPct) }, fmtTok(l.contextTokens)) : '—'),
-          kvRow('上下文上限', l?.maxContextTokens ? fmtTok(l.maxContextTokens) : '—')
+          kvRow('模型名稱', l?.model || '—'),
+          kvRow('上下文', l ? h('span', null, h('span', { className: pctClass(ctxPct) }, fmtTok(l.contextTokens)), `/${l.maxContextTokens ? fmtTok(l.maxContextTokens) : '—'}`) : '—')
         ),
         h('div', { className: 'sub-card' },
           kvRow('上次請求', fmtAge(lastMtimeMs), 'agy-last-age'),

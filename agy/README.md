@@ -35,8 +35,8 @@
 ### 5. `agy/sync-setup.ps1`（客製代理初始化、Skills／對話規則與輔助腳本同步）
 - **主要用途**：建立或更新 `~\.gemini\config\agents\<agent>.md`（預設為 `build`），在使用 `excludeDefaultComponents: true` 保持乾淨提示詞的同時，自動補回 `~\.agents\skills` 清單與跨對話紀錄讀取規則；並同步 `agy/latest_cid.py` 至 `~\.gemini\config\scripts\latest_cid.py`。
 - **解決的痛點**：
-  - **自動建立範本**：若目標 `.md` 不存在，會自動建立含 `excludeDefaultComponents: true` 與已驗證可用 `tools:` 清單（排除無效的 `swarm` 與強制附掛的 `manage_task`）的設定檔，並在檔頭附上遠端生成指令。
-  - **冪等同步**：若檔案已存在，會完整保留既有 YAML 與自訂正文，僅更新 `<conversation_transcript>` 與 `<skills>` 區塊，不產生多餘註解標記（`agy 1.5.16+` 雖已原生掃描 `~\.agents\skills`，但啟用 `excludeDefaultComponents: true` 會連同原生 `<skills>` 注入一起關閉，因此仍需由本腳本注入清單）。
+  - **自動建立範本**：若目標 `.md` 不存在，會自動建立含 `excludeDefaultComponents: true`、`inheritCustomizations: false`、`plugins: []` 與已驗證可用 `tools:` 清單（排除無效的 `swarm` 與強制附掛的 `manage_task`）的設定檔，並在檔頭附上遠端生成指令。
+  - **冪等同步**：若檔案已存在，會更新受管欄位（`name`、`description`、`excludeDefaultComponents`、`inheritCustomizations`、`plugins`、`tools`）並保留其餘自訂 YAML 欄位與自訂正文，同時更新 `<conversation_transcript>` 與 `<skills>` 區塊，不產生多餘註解標記（`agy 1.5.16+` 雖已原生掃描 `~\.agents\skills`，但啟用 `excludeDefaultComponents: true` 會連同原生 `<skills>` 注入一起關閉，因此仍需由本腳本注入清單；而 `inheritCustomizations: false` + `plugins: []` 則用來隔離全域 hooks、plugins 與 workflows）。
 
 ### 6. `agy/audit_tokens.py`（Token 精確計數 vs 真實回傳比對與隱藏內容稽核）
 - **主要用途**：比對 `agy` **本地實際組裝送出的內容**與**真實後端回傳的 `usage`（`input_tokens`、`output_tokens`、`thinking_tokens`、`cache_read_tokens`）**是否一致，並檢查是否有額外注入的隱藏標籤、系統提示詞或工具 Schema。
