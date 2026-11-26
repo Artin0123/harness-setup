@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         agy-metrics Remote Control 內嵌上下文監控
 // @namespace    https://github.com/Artin0123/harness-setup
-// @version      2.1.4
+// @version      2.1.5
 // @description  在 antigravity.google.com 對話框模型選擇器右側內嵌上下文進度環按鈕，即時顯示對話統計與 5h 額度消耗，支援手機橫向滑動、動態高度貼合標題欄與區網主機 IP 連線（連接本機或區網 agy-metrics；支援跨網域 iframe 與 Google Trusted Types）。
 // @updateURL    https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/agy-metrics/agy-metrics-overlay.user.js
 // @downloadURL  https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/agy-metrics/agy-metrics-overlay.user.js
@@ -649,6 +649,7 @@
     hostFeedback = '連線測試中...';
     render();
 
+    const fetchedConvId = currentConvId;
     const res = await gmGetJson(buildActiveUrl(base), 3500);
     hostTesting = false;
     if (res.ok) {
@@ -661,6 +662,7 @@
       lastRenderKey = '';
       render();
       startPingLoop(++pollGen);
+      if (currentConvId && currentConvId !== fetchedConvId) fetchActive();
     } else {
       hostFeedback = `無法連線到 ${base}（${res.error}），請確認電腦端已加 --lan 啟動 agy-metrics`;
       render();
@@ -888,6 +890,7 @@
   };
 
   const autoConnect = async () => {
+    const localConvId = currentConvId;
     const localRes = await gmGetJson(buildActiveUrl(LOCAL_BASE), 1800);
     if (localRes.ok) {
       activeBase = LOCAL_BASE;
@@ -897,6 +900,7 @@
       lastSigToken = '';
       render();
       startPingLoop(++pollGen);
+      if (currentConvId && currentConvId !== localConvId) fetchActive();
       return;
     }
 
@@ -904,6 +908,7 @@
     const savedBase = normalizeHostToBase(savedRaw);
     if (savedBase && savedBase !== LOCAL_BASE) {
       hostInputDraft = savedRaw;
+      const savedConvId = currentConvId;
       const savedRes = await gmGetJson(buildActiveUrl(savedBase), 2500);
       if (savedRes.ok) {
         activeBase = savedBase;
@@ -913,6 +918,7 @@
         lastSigToken = '';
         render();
         startPingLoop(++pollGen);
+        if (currentConvId && currentConvId !== savedConvId) fetchActive();
         return;
       }
       handleDisconnect(`無法連線到先前設定的 ${savedBase}（${savedRes.error}）`);
