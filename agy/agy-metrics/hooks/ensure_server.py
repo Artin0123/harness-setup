@@ -8,6 +8,7 @@ import socket
 import subprocess
 import sys
 import time
+import traceback
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -20,6 +21,24 @@ _CID_RE = re.compile(r"^[0-9a-fA-F-]{8,64}$")
 _REMOTE_CONNECTED_RE = re.compile(
     r"\[remote-control-([0-9a-fA-F-]+-v2)\] Connection status: Connected"
 )
+_LOG_PATH = Path.home() / ".gemini" / "antigravity-cli" / "log" / "ensure_server.log"
+_LOG_MAX_BYTES = 256 * 1024
+
+
+def _log(msg: str, log_path: Path | None = None) -> None:
+    target = log_path or _LOG_PATH
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.is_file() and target.stat().st_size > _LOG_MAX_BYTES:
+            backup = target.with_suffix(".log.1")
+            if backup.exists():
+                backup.unlink()
+            target.replace(backup)
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        with target.open("a", encoding="utf-8") as f:
+            f.write(f"[{ts}] [pid={os.getpid()}] {msg}\n")
+    except OSError:
+        pass
 
 
 def is_listening(port: int) -> bool:
@@ -89,7 +108,8 @@ def get_latest_conversation(db_path: Path | None = None) -> tuple[str, str]:
         if pid and not _CID_RE.fullmatch(pid):
             pid = ""
         return cid, pid
-    except Exception:
+    except Exception as exc:
+        _log(f"get_latest_conversation error: {exc!r} (db={path})")
         return "", ""
     finally:
         if con is not None:
@@ -122,7 +142,12 @@ def wait_and_open_remote(
     import webbrowser
 
     directory = log_dir or (Path.home() / ".gemini" / "antigravity-cli" / "log")
+    _log(
+        f"wait_and_open_remote start: after_log={after_log!r} cid={cid!r} "
+        f"project_id={project_id!r} user={user!r} log_dir={directory} timeout={timeout_sec}s"
+    )
     deadline = time.monotonic() + timeout_sec
+    seen_candidates: set[str] = set()
     while time.monotonic() < deadline:
         if directory.is_dir():
             candidates = sorted(
@@ -131,15 +156,41 @@ def wait_and_open_remote(
                 reverse=True,
             )
             for log_file in candidates:
+                if log_file.name not in seen_candidates:
+                    seen_candidates.add(log_file.name)
+                    _log(f"wait_and_open_remote: watching candidate {log_file.name}")
                 try:
                     text = log_file.read_text(encoding="utf-8", errors="ignore")
-                except OSError:
+                except OSError as exc:
+                    _log(f"wait_and_open_remote: read failed {log_file.name}: {exc!r}")
                     continue
                 m = _REMOTE_CONNECTED_RE.search(text)
                 if m:
-                    webbrowser.open(build_remote_url(m.group(1), cid, project_id, user=user))
+                    url = build_remote_url(m.group(1), cid, project_id, user=user)
+                    try:
+                        opened = webbrowser.open(url)
+                        _log(
+                            f"wait_and_open_remote: matched session={m.group(1)} "
+                            f"in {log_file.name}, webbrowser.open={opened} url={url}"
+                        )
+                    except Exception as exc:
+                        _log(
+                            f"wait_and_open_remote: webbrowser.open raised {exc!r} "
+                            f"for url={url}"
+                        )
                     return
         time.sleep(0.25)
+
+    latest = []
+    if directory.is_dir():
+        latest = [
+            f"{p.name}({p.stat().st_size}B)"
+            for p in sorted(directory.glob("cli-*.log"), key=lambda p: p.name, reverse=True)[:3]
+        ]
+    _log(
+        f"wait_and_open_remote: timeout after {timeout_sec}s; "
+        f"after_log={after_log!r} seen={sorted(seen_candidates)} latest_logs={latest}"
+    )
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -169,12 +220,15 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--user must be >= 0")
 
     if args._wait_remote is not None:
-        wait_and_open_remote(
-            args._wait_remote,
-            cid=args._cid,
-            project_id=args._pid,
-            user=args._user,
-        )
+        try:
+            wait_and_open_remote(
+                args._wait_remote,
+                cid=args._cid,
+                project_id=args._pid,
+                user=args._user,
+            )
+        except Exception:
+            _log(f"_wait_remote crashed:\n{traceback.format_exc().rstrip()}")
         return
 
     if args.stop:
@@ -197,6 +251,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.open_remote is not None:
         cid, project_id = get_latest_conversation() if args.open_remote == "latest" else ("", "")
         if args.open_remote == "latest" and not cid:
+            _log("main --open-remote latest: no resumable conversation found")
             print("No resumable conversation found for --open-remote.", file=sys.stderr)
             return
         log_dir = Path.home() / ".gemini" / "antigravity-cli" / "log"
@@ -208,6 +263,10 @@ def main(argv: list[str] | None = None) -> None:
                 wait_args.extend(["--_pid", project_id])
         if args.user is not None:
             wait_args.extend(["--_user", str(args.user)])
+        _log(
+            f"main --open-remote={args.open_remote} user={args.user!r} "
+            f"cid={cid!r} pid={project_id!r} after_log={after_log!r}; spawning waiter"
+        )
         spawn_detached(wait_args)
 
 
