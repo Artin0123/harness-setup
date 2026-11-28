@@ -20,6 +20,10 @@
 - **封存狀態**：被同目錄新增的 `pwsh-profile-loader` 取代。原方案以 C# shim exe 剔除注入的 `-NoProfile`（in-box `csc` 自動編譯部署至 `%LOCALAPPDATA%\opencode\pwshshim\`），每呼叫支付 ~17ms 的 CLR 啟動 + CreateProcess 雙行程稅。重新考古 v2.2.6 二進位確認 hook 觸發之後 spawner 才讀 `PH.command`（`trigger("shell","create.before",PH)` → `Pae(PH.shell, PH.command)`），改為純 hook 前置 `. $PROFILE`，零行程、零部署。
 - **技術精華**：Windows argv 重引號規則的 C# 5 實作（零反斜線字面量、可內嵌 JS template literal）、in-box 編譯器條件探測、樹狀擊殺（`taskkill /T /F`）與直接子行程的語義推導。行為電池（11 checks）保留在 `archive/opencode/tests/shim/`。
 
+### 4. `agy/sync-agents.ps1` (Antigravity CLI)
+- **封存狀態**：由原 `agy/sync-setup.ps1` 拆出。改回 `agy` 原生預設模式（無 `--agent`）時會自動探索 `~\.agents\skills\` 與全域／專案規則檔，無需額外產生並維護 `~\.gemini\config\agents\<agent>.md`；原本負責安裝／更新常用輔助腳本 `latest_cid.py` 到 `~\.gemini\config\scripts\` 的部分已保留並更名為 [`agy/install-scripts.ps1`](../agy/install-scripts.ps1)。
+- **保留內容**：若需建立或冪等更新含 `excludeDefaultComponents: true`、`inheritCustomizations: false`、`plugins: []`、`tools:` 白名單與 `<conversation_transcript>`／`<skills>` 注入的客製代理，仍可從此處執行。
+
 **已刪除，不保留代碼**：`cmdc-mods` 全系列（env-guard、system-prompt、disable-tools）。原因：該系列當時仍是對一連串無法窮盡的轉換層問題逐一修補，即使改寫成 oc 或 pi 那種單點修復，要處理的問題面也更大，未來要修的話做法也會與現行架構差異很大，因此直接刪除。歷史規格書仍存於 [`docs/archive/spec-old.md`](../docs/archive/spec-old.md)。
 
 ---

@@ -31,7 +31,7 @@ Coding Agent 的環境修復設置合集。Windows 上以原生 PowerShell 為�
 
 ### agy-tools（Antigravity CLI 輔助腳本）
 
-針對 Google Antigravity CLI (`agy`) 的遠端登入、憑證提取、環境同步（代理與輔助腳本）、Schema 抓包與 Token 稽核腳本（包含 `login.ps1`、`get-agy-token.ps1`、`capture_schema.py`、`sync-setup.ps1`、`latest_cid.py`、`audit_tokens.py`），詳見 [`agy/README.md`](agy/README.md)。
+針對 Google Antigravity CLI (`agy`) 的遠端登入、憑證提取、常用腳本安裝、Schema 抓包與 Token 稽核腳本（包含 `login.ps1`、`get-agy-token.ps1`、`capture_schema.py`、`install-scripts.ps1`、`latest_cid.py`、`audit_tokens.py`），詳見 [`agy/README.md`](agy/README.md)。
 
 ## 安裝
 

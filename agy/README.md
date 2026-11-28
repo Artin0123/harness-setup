@@ -32,11 +32,9 @@
   - **系統提示詞精簡 99%**：原生預設代理的 `systemInstruction` 高達 **19,254 字元**（含 `<identity>`、`<artifacts>`、`<skills>`、`<slash_commands>`、`<user_rules>` 等）；而在啟用 `excludeDefaultComponents: true` 的 `clean-template` 下，提示詞縮水至僅 **125 字元**（僅保留自訂的 System Prompt 正文）。
   - **工具宣告（`functionDeclarations`）精確控制**：預設代理會掛載 13 支工具；在 `clean-template` 下會關閉子代理、排程、搜尋等預設組件建構器，僅掛載核心基礎的 6 支工具（`read_file`、`write_file`、`edit_file`、`run_command`、`manage_task`、`ask_question`）。若自訂 `tools:` 進一步精簡，更可縮減至指定的極少數工具。
 
-### 5. `agy/sync-setup.ps1`（客製代理初始化、Skills／對話規則與輔助腳本同步）
-- **主要用途**：建立或更新 `~\.gemini\config\agents\<agent>.md`（預設為 `build`），在使用 `excludeDefaultComponents: true` 保持乾淨提示詞的同時，自動補回 `~\.agents\skills` 清單與跨對話紀錄讀取規則；並同步 `agy/latest_cid.py` 至 `~\.gemini\config\scripts\latest_cid.py`。
-- **解決的痛點**：
-  - **自動建立範本**：若目標 `.md` 不存在，會自動建立含 `excludeDefaultComponents: true`、`inheritCustomizations: false`、`plugins: []` 與已驗證可用 `tools:` 清單（排除無效的 `swarm` 與強制附掛的 `manage_task`）的設定檔，並在檔頭附上遠端生成指令。
-  - **冪等同步**：若檔案已存在，會更新受管欄位（`name`、`description`、`excludeDefaultComponents`、`inheritCustomizations`、`plugins`、`tools`）並保留其餘自訂 YAML 欄位與自訂正文，同時更新 `<conversation_transcript>` 與 `<skills>` 區塊，不產生多餘註解標記（`agy 1.5.16+` 雖已原生掃描 `~\.agents\skills`，但啟用 `excludeDefaultComponents: true` 會連同原生 `<skills>` 注入一起關閉，因此仍需由本腳本注入清單；而 `inheritCustomizations: false` + `plugins: []` 則用來隔離全域 hooks、plugins 與 workflows）。
+### 5. `agy/install-scripts.ps1`（常用輔助腳本安裝與更新）
+- **主要用途**：將常用輔助腳本（目前為 `agy/latest_cid.py`）安裝或覆寫更新至 `~\.gemini\config\scripts\latest_cid.py`（不刪除目錄內其他檔案），支援本地執行優先複製與遠端 `irm | iex` 自動從 GitHub Raw 下載。
+
 
 ### 6. `agy/audit_tokens.py`（Token 精確計數 vs 真實回傳比對與隱藏內容稽核）
 - **主要用途**：比對 `agy` **本地實際組裝送出的內容**與**真實後端回傳的 `usage`（`input_tokens`、`output_tokens`、`thinking_tokens`、`cache_read_tokens`）**是否一致，並檢查是否有額外注入的隱藏標籤、系統提示詞或工具 Schema。
@@ -58,7 +56,7 @@
   ```
 - **安裝油猴腳本**：啟動 `agy` 後會自動拉起背景後端服務，開啟 [GitHub Raw 油猴腳本](https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/agy-metrics/agy-metrics-overlay.user.js) 安裝到 Tampermonkey 即可在 Remote Control 頁面內嵌顯示並自動檢查更新；若需手動優雅關閉，可執行 `irm -Method Post http://127.0.0.1:47891/api/shutdown`。
 - **VS Code 快捷鍵自動啟動範例（自動接續最新有效專案對話 + 就緒後直達網頁 + `--lan`）**：
-  先執行 `irm https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/sync-setup.ps1 | iex` 同步 [`agy/latest_cid.py`](./latest_cid.py)（`latest_cid.py` 與 `ensure_server.py` 皆優先挑選所屬 `~\.gemini\config\projects\<project_id>.json` 存在的最新頂層對話，自動略過 `outside-of-project` 與已刪專案以避免 CLI 跳出 `Invalid Project` 警告；若全庫皆無有效專案對話則統一退回最新一筆頂層對話。純 CLI 也可單獨執行 `agy -r (python "$env:USERPROFILE\.gemini\config\scripts\latest_cid.py")` 直接進對話打 `/compact`）：
+  先執行 `irm https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/install-scripts.ps1 | iex` 安裝 [`agy/latest_cid.py`](./latest_cid.py)（`latest_cid.py` 與 `ensure_server.py` 皆優先挑選所屬 `~\.gemini\config\projects\<project_id>.json` 存在的最新頂層對話，自動略過 `outside-of-project` 與已刪專案以避免 CLI 跳出 `Invalid Project` 警告；若全庫皆無有效專案對話則統一退回最新一筆頂層對話。純 CLI 也可單獨執行 `agy -r (python "$env:USERPROFILE\.gemini\config\scripts\latest_cid.py")` 直接進對話打 `/compact`）：
   ```json
   "args": {
     "text": "python \"$env:USERPROFILE\\.gemini\\config\\plugins\\agy-metrics\\hooks\\ensure_server.py\" --lan --open-remote; $cid = python \"$env:USERPROFILE\\.gemini\\config\\scripts\\latest_cid.py\"; if ($cid) { agy -r $cid --remote-control } else { agy --remote-control }\r"
@@ -166,16 +164,16 @@ python C:\Users\artin\Sync\coding\harness-plugins\agy\audit_tokens.py --gemini-a
 
 #### 3. 完整參數一覽
 
-| 參數 | 預設值 | 說明 |
-| :--- | :--- | :--- |
-| `--gemini-api-key` | **必填**（或讀 `GEMINI_API_KEY`） | Gemini API Key，用於呼叫官方 `:countTokens` 精確計數 |
-| `--prompt-file` | `p1.txt` | 基準提示詞 `.txt` 檔案路徑 |
-| `--probe-prompt-file` | `p2.txt` | 探針提示詞 `.txt` 檔案路徑 |
-| `--model` | `gemini-3.8-flash-low` | 指定測試模型 ID（可用 `agy models` 查詢） |
-| `--agent` | `build` | 指定代理名稱；傳入 `""` 可測原生預設代理 |
-| `--settings` | `""` | 額外傳給 `agy --settings` 的 JSON 字串 |
-| `--timeout` | `120` | 單次 `agy` 執行的逾時秒數（對應 `--print-timeout`） |
-| `--disable-slash-commands` | 關閉 | 停用斜線指令與 Skills 展開 |
-| `--skip-real` | 關閉 | 僅執行本地抓包與 `:countTokens`，不呼叫真實 `agy` |
-| `--proxy-upstream` | `""` | 指定上游網址（如 `https://generativelanguage.googleapis.com`）進行單次透傳 |
-| `--out-dir` | `""` | 將完整 `audit_report.json` 與 `captured_request.json` 存檔至指定目錄 |
+| 參數                       | 預設值                            | 說明                                                                       |
+| :------------------------- | :-------------------------------- | :------------------------------------------------------------------------- |
+| `--gemini-api-key`         | **必填**（或讀 `GEMINI_API_KEY`） | Gemini API Key，用於呼叫官方 `:countTokens` 精確計數                       |
+| `--prompt-file`            | `p1.txt`                          | 基準提示詞 `.txt` 檔案路徑                                                 |
+| `--probe-prompt-file`      | `p2.txt`                          | 探針提示詞 `.txt` 檔案路徑                                                 |
+| `--model`                  | `gemini-3.8-flash-low`            | 指定測試模型 ID（可用 `agy models` 查詢）                                  |
+| `--agent`                  | `build`                           | 指定代理名稱；傳入 `""` 可測原生預設代理                                   |
+| `--settings`               | `""`                              | 額外傳給 `agy --settings` 的 JSON 字串                                     |
+| `--timeout`                | `120`                             | 單次 `agy` 執行的逾時秒數（對應 `--print-timeout`）                        |
+| `--disable-slash-commands` | 關閉                              | 停用斜線指令與 Skills 展開                                                 |
+| `--skip-real`              | 關閉                              | 僅執行本地抓包與 `:countTokens`，不呼叫真實 `agy`                          |
+| `--proxy-upstream`         | `""`                              | 指定上游網址（如 `https://generativelanguage.googleapis.com`）進行單次透傳 |
+| `--out-dir`                | `""`                              | 將完整 `audit_report.json` 與 `captured_request.json` 存檔至指定目錄       |

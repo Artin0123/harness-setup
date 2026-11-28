@@ -22,10 +22,10 @@ agy plugin install https://github.com/Artin0123/harness-setup/tree/master/agy/ag
 
 ### 選配：VS Code 快捷鍵一鍵啟動（自動接續最新有效專案對話 + 就緒後直達網頁 + `--lan`）
 
-先透過一行指令同步 `latest_cid.py` 到 `~\.gemini\config\scripts\latest_cid.py`（`latest_cid.py` 與 `ensure_server.py` 皆優先挑選所屬 `~\.gemini\config\projects\<project_id>.json` 存在的最新頂層對話，自動跳過 `outside-of-project` 與已刪專案以確保兩端同步且不跳 `Invalid Project`；若皆無有效專案則統一退回最新一筆頂層對話。純 CLI 亦可單獨執行 `agy -r (python "$env:USERPROFILE\.gemini\config\scripts\latest_cid.py")` 用於 `/compact` 等操作）：
+先透過一行指令安裝 `latest_cid.py` 到 `~\.gemini\config\scripts\latest_cid.py`（`latest_cid.py` 與 `ensure_server.py` 皆優先挑選所屬 `~\.gemini\config\projects\<project_id>.json` 存在的最新頂層對話，自動跳過 `outside-of-project` 與已刪專案以確保兩端同步且不跳 `Invalid Project`；若皆無有效專案則統一退回最新一筆頂層對話。純 CLI 亦可單獨執行 `agy -r (python "$env:USERPROFILE\.gemini\config\scripts\latest_cid.py")` 用於 `/compact` 等操作）：
 
 ```powershell
-irm https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/sync-setup.ps1 | iex
+irm https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/install-scripts.ps1 | iex
 ```
 
 再於 VS Code `keybindings.json` 加入：

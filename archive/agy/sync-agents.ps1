@@ -1,22 +1,20 @@
-<#
+﻿<#
 .SYNOPSIS
-    同步 agy 個人環境設定：建立或更新自訂代理 (.md) 與 Skills／對話規則注入，並同步常用輔助腳本（latest_cid.py）至 ~\.gemini\config\scripts。
+    建立或更新 agy 自訂代理 (.md) 與 Skills／對話規則注入。
 .DESCRIPTION
     - 若目標 ~/.gemini/config/agents/<agent>.md 不存在，會自動建立標準範本（含生成指令註解、excludeDefaultComponents: true、inheritCustomizations: false 與已驗證可用的 tools 清單）。
     - 若檔案已存在，則保留既有的 YAML Frontmatter 與自訂系統提示詞正文，僅冪等更新尾端的 <conversation_transcript> 與 <skills> 區塊。
-    - agy 1.5.16+ 已原生掃描 ~/.agents/skills/*/SKILL.md，不需要複製鏡像到 ~/.gemini/config/skills。
-    - 同步 agy/latest_cid.py 到 ~/.gemini/config/scripts/latest_cid.py（本地優先複製，遠端 irm|iex 則從 GitHub Raw 下載）。
+    - agy 1.5.16+ 已原生掃描 ~/.agents/skills/*/SKILL.md，不需要複製鏡像到 ~/.gemini/config/skills；若改回預設模式（無 --agent），則無需此腳本，已封存於 archive/agy/。
 .EXAMPLE
-    pwsh -Command "irm https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/sync-setup.ps1 | iex"
-    pwsh -File .\agy\sync-setup.ps1 -Agents build
-    pwsh -File .\agy\sync-setup.ps1 -Agents build,research -DryRun
+    pwsh -Command "irm https://raw.githubusercontent.com/Artin0123/harness-setup/master/archive/agy/sync-agents.ps1 | iex"
+    pwsh -File .\archive\agy\sync-agents.ps1 -Agents build
+    pwsh -File .\archive\agy\sync-agents.ps1 -Agents build,research -DryRun
 #>
 [CmdletBinding()]
 param(
     [string[]]$Agents = @("build"),
     [string]$SkillsDir = (Join-Path $HOME ".agents\skills"),
     [string]$AgentsDir = (Join-Path $HOME ".gemini\config\agents"),
-    [string]$ScriptsDir = (Join-Path $HOME ".gemini\config\scripts"),
     [string]$AppDataDir = (Join-Path $HOME ".gemini\antigravity-cli"),
     [switch]$DryRun
 )
@@ -24,8 +22,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$OneLinerCmd = 'pwsh -Command "irm https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/sync-setup.ps1 | iex"'
-$LatestCidRawUrl = 'https://raw.githubusercontent.com/Artin0123/harness-setup/master/agy/latest_cid.py'
+$OneLinerCmd = 'pwsh -Command "irm https://raw.githubusercontent.com/Artin0123/harness-setup/master/archive/agy/sync-agents.ps1 | iex"'
 
 function Parse-SkillFrontmatter {
     param([string]$SkillMdPath)
@@ -177,7 +174,6 @@ function Merge-AgentFrontmatter {
             $currentLines = [System.Collections.Generic.List[string]]::new()
             $currentLines.Add($line)
         } elseif ($null -ne $currentKey) {
-            # 若遇到頂層獨立註解（非縮排且前面已有空行），不併入其他區塊
             $currentLines.Add($line)
         }
     }
@@ -187,7 +183,6 @@ function Merge-AgentFrontmatter {
     $mergedParts.Add("# 生成指令:`r`n# $OneLinerCmd")
     foreach ($entry in $templateEntries) {
         if ($entry.Key -eq 'tools') {
-            # 先放保留的自訂欄位，再放 tools 清單較整潔
             foreach ($ob in $otherBlocks) { $mergedParts.Add($ob) }
         }
         $mergedParts.Add($entry.Text)
@@ -245,7 +240,7 @@ foreach ($agentName in ($Agents | ForEach-Object { $_ -split ',' } | ForEach-Obj
     $targetPath = Join-Path $AgentsDir "$agentName.md"
 
     if (-not (Test-Path $targetPath)) {
-        $template = New-AgentTemplate -AgentName $agentName
+        $template = New-AgentTemplate -AgentName $AgentName
         $updated = "$template`r`n`r`n$block`r`n"
         $action = "已自動建立新代理並寫入注入區塊"
         if ($DryRun) {
@@ -262,7 +257,6 @@ foreach ($agentName in ($Agents | ForEach-Object { $_ -split ',' } | ForEach-Obj
             $updated = [regex]::Replace($mergedContent, $blockPattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $block })
             $action = "已合併 YAML 並更新既有注入區塊"
         } else {
-            # 若僅殘留其中一個標籤，先移除再統一附加，避免重複
             $cleaned = [regex]::Replace($mergedContent, $transcriptOnlyPattern, '')
             $cleaned = [regex]::Replace($cleaned, $skillsOnlyPattern, '')
             $trimmed = $cleaned.TrimEnd("`r", "`n")
@@ -283,22 +277,4 @@ foreach ($agentName in ($Agents | ForEach-Object { $_ -split ',' } | ForEach-Obj
         [System.IO.File]::WriteAllText($targetPath, $updated, [System.Text.UTF8Encoding]::new($false))
         Write-Host "[OK] $targetPath -> $action (共載入 $($skills.Count) 個 skills)" -ForegroundColor Green
     }
-}
-
-# 4. 同步輔助腳本 latest_cid.py 到 ~/.gemini/config/scripts
-$latestCidDest = Join-Path $ScriptsDir "latest_cid.py"
-$localLatestCidSrc = if ($PSScriptRoot) { Join-Path $PSScriptRoot "latest_cid.py" } else { $null }
-if ($DryRun) {
-    $srcLabel = if ($localLatestCidSrc -and (Test-Path -LiteralPath $localLatestCidSrc)) { $localLatestCidSrc } else { $LatestCidRawUrl }
-    Write-Host "[DryRun] $latestCidDest <- $srcLabel" -ForegroundColor Yellow
-} else {
-    if (-not (Test-Path $ScriptsDir)) {
-        New-Item -ItemType Directory -Path $ScriptsDir -Force | Out-Null
-    }
-    if ($localLatestCidSrc -and (Test-Path -LiteralPath $localLatestCidSrc)) {
-        Copy-Item -LiteralPath $localLatestCidSrc -Destination $latestCidDest -Force
-    } else {
-        Invoke-WebRequest -Uri $LatestCidRawUrl -OutFile $latestCidDest -UseBasicParsing
-    }
-    Write-Host "[OK] $latestCidDest -> 已同步最新對話 ID 查詢腳本" -ForegroundColor Green
 }
